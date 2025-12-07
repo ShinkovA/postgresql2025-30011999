@@ -1,4 +1,3 @@
-````markdown
 # HW #3 — PostgreSQL на внешнем диске
 
 Домашнее задание по курсу **OTUS: PostgreSQL Advanced**.
