@@ -1,0 +1,12 @@
+# Managed by Ansible
+
+[global]
+repo1-type=posix
+repo1-path={{ pgbackrest_repo_path }}
+repo1-retention-full={{ pgbackrest_retention_full }}
+start-fast=y
+log-level-console=info
+log-level-file=info
+
+[{{ pgbackrest_stanza }}]
+pg1-path={{ patroni_data_dir }}

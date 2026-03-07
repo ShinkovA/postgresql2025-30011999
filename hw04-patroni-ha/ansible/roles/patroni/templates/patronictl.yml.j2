@@ -1,0 +1,18 @@
+# Managed by Ansible
+
+scope: "{{ patroni_scope }}"
+namespace: "{{ patroni_namespace }}"
+name: "{{ inventory_hostname }}"
+
+restapi:
+  authentication:
+    username: "{{ patroni_restapi_username }}"
+    password: "{{ patroni_restapi_password }}"
+
+etcd3:
+  protocol: http
+  # patronictl talks to the DCS (etcd), not to Postgres/Patroni nodes
+  # Prefer inventory IPs (ansible_host), fall back to gathered facts
+  hosts: "{% for host in groups[etcd_cluster_group | default('etcd_nodes')] -%}{{ hostvars[host].ansible_host | default(hostvars[host].ansible_default_ipv4.address) }}:2379{% if not loop.last %},{% endif %}{%- endfor %}"
+  username: ""
+  password: ""

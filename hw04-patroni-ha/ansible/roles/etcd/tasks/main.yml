@@ -1,0 +1,182 @@
+---
+# Tasks for etcd role
+
+# На свежеподнятых VM часто параллельно бежит cloud-init/apt-daily, который держит dpkg lock.
+# Чтобы плейбук работал "из коробки", ждём освобождения APT/DPKG locks перед любыми apt-задачами.
+- name: Wait for apt/dpkg locks to be released
+  shell: |
+    set -euo pipefail
+    locks=(
+      /var/lib/dpkg/lock-frontend
+      /var/lib/dpkg/lock
+      /var/lib/apt/lists/lock
+      /var/cache/apt/archives/lock
+    )
+    for _ in $(seq 1 180); do
+      busy=0
+      for l in "${locks[@]}"; do
+        if [ -e "$l" ] && fuser "$l" >/dev/null 2>&1; then
+          busy=1
+          break
+        fi
+      done
+      if [ "$busy" -eq 0 ]; then
+        exit 0
+      fi
+      sleep 5
+    done
+    echo "Timeout waiting for APT/DPKG locks (cloud-init/apt-daily may be running)" >&2
+    exit 1
+  args:
+    executable: /bin/bash
+  changed_when: false
+
+# --- Чистка возможных хвостов от PGDG, чтобы apt не ругался на Signed-By ---
+
+- name: Remove known PGDG .list files by name (if exist)
+  file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - /etc/apt/sources.list.d/pgdg.list
+    - /etc/apt/sources.list.d/pgdg-source.list
+  failed_when: false
+
+- name: Find any other sources.list.d entries that reference apt.postgresql.org
+  find:
+    paths: /etc/apt/sources.list.d
+    patterns: "*.list"
+    contains: "apt.postgresql.org"
+  register: pgdg_find_result
+  failed_when: false
+
+- name: Remove found PGDG list files
+  file:
+    path: "{{ item.path }}"
+    state: absent
+  loop: "{{ pgdg_find_result.files | default([]) }}"
+  when: pgdg_find_result.matched | default(0) | int > 0
+
+- name: Remove PGDG entries from /etc/apt/sources.list (if any)
+  lineinfile:
+    path: /etc/apt/sources.list
+    regexp: '^deb .*apt.postgresql.org.*'
+    state: absent
+  register: pgdg_sources_removed
+  failed_when: false
+
+- name: Remove legacy PGDG keyrings in /etc/apt/keyrings (if any)
+  file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - /etc/apt/keyrings/postgresql.gpg
+    - /etc/apt/keyrings/postgresql.asc
+  failed_when: false
+
+# --- etcd пакеты -------------------------------------------------------------
+
+- name: Ensure etcd server and client are installed
+  apt:
+    name:
+      - etcd-server
+      - etcd-client
+    state: present
+    update_cache: yes
+    lock_timeout: 600
+
+# The distro unit may start etcd with a config file that binds to localhost.
+# We always reconfigure etcd and restart it with our settings.
+
+- name: Stop etcd before reconfiguration (if running)
+  systemd:
+    name: etcd
+    state: stopped
+  failed_when: false
+
+- name: Remove legacy etcd data dir used by distro defaults (if any)
+  file:
+    path: /var/lib/etcd/default
+    state: absent
+  failed_when: false
+
+# --- Директория данных etcd ---------------------------------------------------
+
+- name: Ensure etcd data directory exists
+  file:
+    path: "{{ etcd_data_dir }}"
+    state: directory
+    owner: etcd
+    group: etcd
+    mode: "0700"
+
+- name: Detect whether etcd member dir already exists
+  stat:
+    path: "{{ etcd_data_dir }}/member"
+  register: etcd_member_dir
+
+- name: Set etcd initial cluster state for idempotent reruns
+  set_fact:
+    etcd_initial_cluster_state: "{{ 'existing' if etcd_member_dir.stat.exists else 'new' }}"
+
+# --- /etc/default/etcd -------------------------------------------------------
+
+- name: Deploy /etc/default/etcd
+  template:
+    src: etcd-default.j2
+    dest: /etc/default/etcd
+    owner: root
+    group: root
+    mode: "0644"
+  notify:
+    - Restart etcd
+
+- name: Ensure systemd override directory for etcd exists
+  file:
+    path: /etc/systemd/system/etcd.service.d
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Force etcd to run from /etc/default/etcd (override distro ExecStart)
+  copy:
+    dest: /etc/systemd/system/etcd.service.d/10-ansible.conf
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      # Managed by Ansible
+      [Service]
+      EnvironmentFile=/etc/default/etcd
+      ExecStart=
+      ExecStart=/usr/bin/etcd
+  notify:
+    - Restart etcd
+
+# --- Сервис etcd -------------------------------------------------------------
+
+- name: Ensure etcd service is enabled and started
+  systemd:
+    name: etcd
+    enabled: yes
+    state: started
+    daemon_reload: yes
+
+- name: Wait for etcd client port on this node
+  wait_for:
+    host: "{{ ansible_default_ipv4.address }}"
+    port: "{{ etcd_client_port }}"
+    timeout: 60
+
+- name: Wait for etcd cluster to become healthy (etcdctl)
+  command: >-
+    etcdctl
+    --endpoints="{% for host in groups[etcd_cluster_group] %}http://{{ hostvars[host].ansible_default_ipv4.address }}:{{ etcd_client_port }}{% if not loop.last %},{% endif %}{% endfor %}"
+    endpoint health
+  environment:
+    ETCDCTL_API: "3"
+  register: etcdctl_health
+  retries: 30
+  delay: 2
+  until: etcdctl_health.rc == 0

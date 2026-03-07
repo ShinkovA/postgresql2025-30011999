@@ -1,0 +1,133 @@
+---
+# Backup server role: prepares a dedicated disk, mounts it, and exports via NFS.
+
+- name: Install packages for NFS + disk setup
+  ansible.builtin.apt:
+    name:
+      - nfs-kernel-server
+      - nfs-common
+      - parted
+      - e2fsprogs
+      - util-linux
+    state: present
+    update_cache: yes
+
+- name: Detect backup disk device (approx {{ backup_disk_size_gb }}G)
+  ansible.builtin.shell: |
+    set -euo pipefail
+
+    target_gb={{ backup_disk_size_gb | int }}
+    target=$((target_gb * 1024 * 1024 * 1024))
+    lo=$((target * 90 / 100))
+    hi=$((target * 110 / 100))
+
+    # Find disks in size window which do NOT contain the root filesystem.
+    best=""
+    bestdiff=""
+
+    while read -r name size type; do
+      [ "$type" = "disk" ] || continue
+
+      # Skip disks that contain '/'
+      if lsblk -nr "/dev/$name" -o MOUNTPOINT | grep -qx '/'; then
+        continue
+      fi
+
+      if [ "$size" -ge "$lo" ] && [ "$size" -le "$hi" ]; then
+        diff=$(( size > target ? size - target : target - size ))
+        if [ -z "$best" ] || [ "$diff" -lt "$bestdiff" ]; then
+          best="$name"
+          bestdiff="$diff"
+        fi
+      fi
+    done < <(lsblk -b -dn -o NAME,SIZE,TYPE)
+
+    if [ -z "$best" ]; then
+      echo ""; exit 0
+    fi
+
+    echo "/dev/$best"
+  args:
+    executable: /bin/bash
+  register: backup_disk_device
+  changed_when: false
+
+- name: Fail if backup disk device not detected
+  ansible.builtin.fail:
+    msg: "Could not detect backup disk (~{{ backup_disk_size_gb }}G). Check that Proxmox attached scsi1 to backup-01."
+  when: (backup_disk_device.stdout | trim) == ''
+
+- name: Set backup disk facts
+  ansible.builtin.set_fact:
+    backup_disk: "{{ backup_disk_device.stdout | trim }}"
+    backup_part: "{{ (backup_disk_device.stdout | trim) }}1"
+
+- name: Create GPT partition on backup disk (idempotent)
+  ansible.builtin.shell: |
+    set -euo pipefail
+
+    if lsblk -nr "{{ backup_part }}" >/dev/null 2>&1; then
+      exit 0
+    fi
+
+    parted -s "{{ backup_disk }}" mklabel gpt
+    parted -s -a optimal "{{ backup_disk }}" mkpart primary ext4 0% 100%
+  args:
+    executable: /bin/bash
+  changed_when: false
+
+- name: Wait for partition to appear
+  ansible.builtin.wait_for:
+    path: "{{ backup_part }}"
+    timeout: 60
+
+- name: Create ext4 filesystem if missing
+  ansible.builtin.shell: |
+    set -euo pipefail
+
+    fstype=$(blkid -o value -s TYPE "{{ backup_part }}" || true)
+    if [ -z "$fstype" ]; then
+      mkfs.ext4 -F "{{ backup_part }}"
+    fi
+  args:
+    executable: /bin/bash
+  changed_when: false
+
+- name: Ensure backup mount point exists
+  ansible.builtin.file:
+    path: "{{ backup_mount_point }}"
+    state: directory
+    mode: "0755"
+
+- name: Mount backup disk to {{ backup_mount_point }}
+  ansible.posix.mount:
+    path: "{{ backup_mount_point }}"
+    src: "{{ backup_part }}"
+    fstype: ext4
+    opts: defaults
+    state: mounted
+
+- name: Ensure pgBackRest repository directory exists (world-writable for lab)
+  ansible.builtin.file:
+    path: "{{ backup_mount_point }}/pgbackrest"
+    state: directory
+    mode: "0777"
+
+- name: Deploy /etc/exports for pgBackRest repo
+  ansible.builtin.template:
+    src: exports.j2
+    dest: /etc/exports
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart NFS server
+
+- name: Export NFS shares
+  ansible.builtin.command: exportfs -ra
+  changed_when: false
+
+- name: Ensure NFS server is enabled and running
+  ansible.builtin.systemd:
+    name: nfs-server
+    enabled: true
+    state: started

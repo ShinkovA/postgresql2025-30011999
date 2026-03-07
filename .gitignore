@@ -2,3 +2,17 @@
 !/.gitignore
 *.swp
 *.swo
+
+# ansible local env/secrets
+**/env.sh
+**/.venv/
+**/*.retry
+**/*.log
+
+# archives
+**/*.tgz
+**/*.tar.gz
+
+# ssh keys
+**/*.pem
+**/*.key

@@ -1,0 +1,367 @@
+---
+- name: Create etcd + Patroni + HAProxy VMs on Proxmox
+  hosts: localhost
+  gather_facts: false
+  vars:
+    # Proxmox API
+    proxmox_api_url: "{{ lookup('env', 'PROXMOX_API_URL') | default('', true) }}"
+    proxmox_api_host: >-
+      {{
+        (lookup('env','PROXMOX_API_HOST') | default('', true))
+        if (lookup('env','PROXMOX_API_HOST') | default('', true) | length > 0)
+        else (
+          proxmox_api_url
+          | regex_replace('^https?://', '')
+          | regex_replace('/.*$', '')
+          | regex_replace(':.*$', '')
+        )
+      }}
+    proxmox_api_user: "{{ lookup('env', 'PROXMOX_API_USER') | default('', true) }}"
+    proxmox_api_token_id: "{{ lookup('env', 'PROXMOX_API_TOKEN_ID') | default('', true) }}"
+    proxmox_api_token_secret: "{{ lookup('env', 'PROXMOX_API_TOKEN_SECRET') | default('', true) }}"
+
+    # Cloud-init (do not self-reference to avoid recursion)
+    cloud_init_user: "{{ lookup('env', 'CI_USER') | default('aurus', true) }}"
+    cloud_init_password: "{{ lookup('env', 'CI_PASSWORD') | default('', true) }}"
+    cloud_init_ssh_public_key: "{{ lookup('env', 'CLOUD_INIT_SSH_PUBLIC_KEY') | default('', true) }}"
+
+    # DNS
+    dns_server: "{{ lookup('env', 'DNS_SERVER') | default('10.10.92.53', true) }}"
+    search_domain: "{{ lookup('env', 'SEARCH_DOMAIN') | default('prod.home.arpa', true) }}"
+
+  tasks:
+    - name: Sanity check Proxmox and cloud-init env vars
+      ansible.builtin.assert:
+        that:
+          - proxmox_api_host | length > 0
+          - proxmox_api_user | length > 0
+          - proxmox_api_token_id | length > 0
+          - proxmox_api_token_secret | length > 0
+          - cloud_init_user | length > 0
+          - cloud_init_ssh_public_key | length > 0
+        fail_msg: |
+          Missing required env vars.
+          Required:
+          - PROXMOX_API_HOST (or PROXMOX_API_URL)
+          - PROXMOX_API_USER
+          - PROXMOX_API_TOKEN_ID
+          - PROXMOX_API_TOKEN_SECRET
+          - CLOUD_INIT_SSH_PUBLIC_KEY
+
+    # -------------------------------------------------------------------------
+    # etcd VMs
+    # -------------------------------------------------------------------------
+
+    - name: Clone etcd VMs from template
+      community.proxmox.proxmox_kvm:
+        api_host: "{{ proxmox_api_host }}"
+        api_user: "{{ proxmox_api_user }}"
+        api_token_id: "{{ proxmox_api_token_id }}"
+        api_token_secret: "{{ proxmox_api_token_secret }}"
+        validate_certs: false
+        node: "{{ proxmox_node }}"
+        # NOTE: proxmox_kvm treats 'clone' as the *name* of VM to clone.
+        # When 'vmid' is set, 'clone' can be any string; the source is taken from 'vmid'.
+        vmid: "{{ proxmox_template_vmid }}"
+        clone: "{{ item.name }}"
+        newid: "{{ item.vmid }}"
+        name: "{{ item.name }}"
+        full: true
+        storage: "{{ proxmox_storage }}"
+        timeout: 600
+      loop: "{{ etcd_nodes }}"
+
+      when: provision_vms | bool
+    - name: Configure cloud-init + static IP + ssh keys on etcd VMs
+      community.proxmox.proxmox_kvm:
+        api_host: "{{ proxmox_api_host }}"
+        api_user: "{{ proxmox_api_user }}"
+        api_token_id: "{{ proxmox_api_token_id }}"
+        api_token_secret: "{{ proxmox_api_token_secret }}"
+        validate_certs: false
+        node: "{{ proxmox_node }}"
+        vmid: "{{ item.vmid }}"
+        ciuser: "{{ cloud_init_user }}"
+        cipassword: "{{ cloud_init_password if (cloud_init_password|length>0) else omit }}"
+        sshkeys: "{{ cloud_init_ssh_public_key }}"
+        ipconfig:
+          ipconfig0: "ip={{ item.ip }},gw={{ item.gw }}"
+        nameservers: ["{{ dns_server }}"]
+        searchdomains: ["{{ search_domain }}"]
+        onboot: true
+        update: true
+      loop: "{{ etcd_nodes }}"
+
+    - name: Start etcd VMs
+      community.proxmox.proxmox_kvm:
+        api_host: "{{ proxmox_api_host }}"
+        api_user: "{{ proxmox_api_user }}"
+        api_token_id: "{{ proxmox_api_token_id }}"
+        api_token_secret: "{{ proxmox_api_token_secret }}"
+        validate_certs: false
+        node: "{{ proxmox_node }}"
+        vmid: "{{ item.vmid }}"
+        state: started
+      loop: "{{ etcd_nodes }}"
+
+    - name: Wait for SSH on etcd nodes
+      ansible.builtin.wait_for:
+        host: "{{ item.ip | regex_replace('/.*$', '') }}"
+        port: 22
+        delay: 5
+        timeout: 600
+      loop: "{{ etcd_nodes }}"
+
+    - name: Add etcd nodes to inventory group etcd_nodes
+      ansible.builtin.add_host:
+        name: "{{ item.name }}"
+        ansible_host: "{{ item.ip | regex_replace('/.*$', '') }}"
+        ansible_user: "{{ cloud_init_user }}"
+        groups: "etcd_nodes"
+      loop: "{{ etcd_nodes }}"
+
+    # -------------------------------------------------------------------------
+    # Patroni/PG VMs
+    # -------------------------------------------------------------------------
+
+    - name: Clone Patroni VMs from template
+      community.proxmox.proxmox_kvm:
+        api_host: "{{ proxmox_api_host }}"
+        api_user: "{{ proxmox_api_user }}"
+        api_token_id: "{{ proxmox_api_token_id }}"
+        api_token_secret: "{{ proxmox_api_token_secret }}"
+        validate_certs: false
+        node: "{{ proxmox_node }}"
+        vmid: "{{ proxmox_template_vmid }}"
+        clone: "{{ item.name }}"
+        newid: "{{ item.vmid }}"
+        name: "{{ item.name }}"
+        full: true
+        storage: "{{ proxmox_storage }}"
+        timeout: 600
+      loop: "{{ patroni_nodes }}"
+
+      when: provision_vms | bool
+    - name: Configure cloud-init + static IP + ssh keys on Patroni VMs
+      community.proxmox.proxmox_kvm:
+        api_host: "{{ proxmox_api_host }}"
+        api_user: "{{ proxmox_api_user }}"
+        api_token_id: "{{ proxmox_api_token_id }}"
+        api_token_secret: "{{ proxmox_api_token_secret }}"
+        validate_certs: false
+        node: "{{ proxmox_node }}"
+        vmid: "{{ item.vmid }}"
+        ciuser: "{{ cloud_init_user }}"
+        cipassword: "{{ cloud_init_password if (cloud_init_password|length>0) else omit }}"
+        sshkeys: "{{ cloud_init_ssh_public_key }}"
+        ipconfig:
+          ipconfig0: "ip={{ item.ip }},gw={{ item.gw }}"
+        nameservers: ["{{ dns_server }}"]
+        searchdomains: ["{{ search_domain }}"]
+        onboot: true
+        update: true
+      loop: "{{ patroni_nodes }}"
+
+    - name: Start Patroni VMs
+      community.proxmox.proxmox_kvm:
+        api_host: "{{ proxmox_api_host }}"
+        api_user: "{{ proxmox_api_user }}"
+        api_token_id: "{{ proxmox_api_token_id }}"
+        api_token_secret: "{{ proxmox_api_token_secret }}"
+        validate_certs: false
+        node: "{{ proxmox_node }}"
+        vmid: "{{ item.vmid }}"
+        state: started
+      loop: "{{ patroni_nodes }}"
+
+    - name: Wait for SSH on Patroni nodes
+      ansible.builtin.wait_for:
+        host: "{{ item.ip | regex_replace('/.*$', '') }}"
+        port: 22
+        delay: 5
+        timeout: 600
+      loop: "{{ patroni_nodes }}"
+
+    - name: Add Patroni nodes to inventory group patroni_nodes
+      ansible.builtin.add_host:
+        name: "{{ item.name }}"
+        ansible_host: "{{ item.ip | regex_replace('/.*$', '') }}"
+        ansible_user: "{{ cloud_init_user }}"
+        groups: "patroni_nodes"
+      loop: "{{ patroni_nodes }}"
+
+    # -------------------------------------------------------------------------
+    # HAProxy VM
+    # -------------------------------------------------------------------------
+
+    - name: Clone HAProxy VM from template
+      community.proxmox.proxmox_kvm:
+        api_host: "{{ proxmox_api_host }}"
+        api_user: "{{ proxmox_api_user }}"
+        api_token_id: "{{ proxmox_api_token_id }}"
+        api_token_secret: "{{ proxmox_api_token_secret }}"
+        validate_certs: false
+        node: "{{ proxmox_node }}"
+        vmid: "{{ proxmox_template_vmid }}"
+        clone: "{{ item.name }}"
+        newid: "{{ item.vmid }}"
+        name: "{{ item.name }}"
+        full: true
+        storage: "{{ proxmox_storage }}"
+        timeout: 600
+      loop: "{{ haproxy_nodes }}"
+
+      when: provision_vms | bool
+    - name: Configure cloud-init + static IP + ssh keys on HAProxy VM
+      community.proxmox.proxmox_kvm:
+        api_host: "{{ proxmox_api_host }}"
+        api_user: "{{ proxmox_api_user }}"
+        api_token_id: "{{ proxmox_api_token_id }}"
+        api_token_secret: "{{ proxmox_api_token_secret }}"
+        validate_certs: false
+        node: "{{ proxmox_node }}"
+        vmid: "{{ item.vmid }}"
+        ciuser: "{{ cloud_init_user }}"
+        cipassword: "{{ cloud_init_password if (cloud_init_password|length>0) else omit }}"
+        sshkeys: "{{ cloud_init_ssh_public_key }}"
+        ipconfig:
+          ipconfig0: "ip={{ item.ip }},gw={{ item.gw }}"
+        nameservers: ["{{ dns_server }}"]
+        searchdomains: ["{{ search_domain }}"]
+        onboot: true
+        update: true
+      loop: "{{ haproxy_nodes }}"
+
+    - name: Start HAProxy VM
+      community.proxmox.proxmox_kvm:
+        api_host: "{{ proxmox_api_host }}"
+        api_user: "{{ proxmox_api_user }}"
+        api_token_id: "{{ proxmox_api_token_id }}"
+        api_token_secret: "{{ proxmox_api_token_secret }}"
+        validate_certs: false
+        node: "{{ proxmox_node }}"
+        vmid: "{{ item.vmid }}"
+        state: started
+      loop: "{{ haproxy_nodes }}"
+
+    - name: Wait for SSH on HAProxy node
+      ansible.builtin.wait_for:
+        host: "{{ item.ip | regex_replace('/.*$', '') }}"
+        port: 22
+        delay: 5
+        timeout: 600
+      loop: "{{ haproxy_nodes }}"
+
+    - name: Add HAProxy node to inventory group haproxy_nodes
+      ansible.builtin.add_host:
+        name: "{{ item.name }}"
+        ansible_host: "{{ item.ip | regex_replace('/.*$', '') }}"
+        ansible_user: "{{ cloud_init_user }}"
+        groups: "haproxy_nodes"
+      loop: "{{ haproxy_nodes }}"
+
+    # -------------------------------------------------------------------------
+    # Backup VM (NFS repo for pgBackRest)
+    # -------------------------------------------------------------------------
+
+    - name: Clone Backup VM from template
+      community.proxmox.proxmox_kvm:
+        api_host: "{{ proxmox_api_host }}"
+        api_user: "{{ proxmox_api_user }}"
+        api_token_id: "{{ proxmox_api_token_id }}"
+        api_token_secret: "{{ proxmox_api_token_secret }}"
+        validate_certs: false
+        node: "{{ proxmox_node }}"
+        vmid: "{{ proxmox_template_vmid }}"
+        clone: "{{ item.name }}"
+        newid: "{{ item.vmid }}"
+        name: "{{ item.name }}"
+        full: true
+        storage: "{{ proxmox_storage }}"
+        timeout: 600
+      loop: "{{ backup_nodes | default([]) }}"
+      when:
+        - provision_vms | bool
+        - pgbackrest_enabled | default(false) | bool
+        - (backup_nodes | default([]) | length) > 0
+
+    - name: Configure cloud-init + static IP + ssh keys on Backup VM
+      community.proxmox.proxmox_kvm:
+        api_host: "{{ proxmox_api_host }}"
+        api_user: "{{ proxmox_api_user }}"
+        api_token_id: "{{ proxmox_api_token_id }}"
+        api_token_secret: "{{ proxmox_api_token_secret }}"
+        validate_certs: false
+        node: "{{ proxmox_node }}"
+        vmid: "{{ item.vmid }}"
+        ciuser: "{{ cloud_init_user }}"
+        cipassword: "{{ cloud_init_password if (cloud_init_password|length>0) else omit }}"
+        sshkeys: "{{ cloud_init_ssh_public_key }}"
+        ipconfig:
+          ipconfig0: "ip={{ item.ip }},gw={{ item.gw }}"
+        nameservers: ["{{ dns_server }}"]
+        searchdomains: ["{{ search_domain }}"]
+        onboot: true
+        update: true
+      loop: "{{ backup_nodes | default([]) }}"
+      when:
+        - pgbackrest_enabled | default(false) | bool
+        - (backup_nodes | default([]) | length) > 0
+
+    # NOTE: For adding disks we use proxmox_disk (more reliable than proxmox_kvm update
+    # across different collection versions).
+    - name: Attach extra backup disk to Backup VM ({{ backup_disk_size_gb | default(200) }}G)
+      community.proxmox.proxmox_disk:
+        api_host: "{{ proxmox_api_host }}"
+        api_user: "{{ proxmox_api_user }}"
+        api_token_id: "{{ proxmox_api_token_id }}"
+        api_token_secret: "{{ proxmox_api_token_secret }}"
+        validate_certs: false
+        vmid: "{{ item.vmid }}"
+        disk: "{{ backup_disk_key | default('scsi1') }}"
+        storage: "{{ proxmox_backup_storage | default(proxmox_storage) }}"
+        size: "{{ backup_disk_size_gb | default(200) }}"
+        format: "{{ backup_disk_format | default('raw') }}"
+        state: present
+      loop: "{{ backup_nodes | default([]) }}"
+      when:
+        - pgbackrest_enabled | default(false) | bool
+        - (backup_nodes | default([]) | length) > 0
+
+    - name: Start Backup VM
+      community.proxmox.proxmox_kvm:
+        api_host: "{{ proxmox_api_host }}"
+        api_user: "{{ proxmox_api_user }}"
+        api_token_id: "{{ proxmox_api_token_id }}"
+        api_token_secret: "{{ proxmox_api_token_secret }}"
+        validate_certs: false
+        node: "{{ proxmox_node }}"
+        vmid: "{{ item.vmid }}"
+        state: started
+      loop: "{{ backup_nodes | default([]) }}"
+      when:
+        - pgbackrest_enabled | default(false) | bool
+        - (backup_nodes | default([]) | length) > 0
+
+    - name: Wait for SSH on Backup node
+      ansible.builtin.wait_for:
+        host: "{{ item.ip | regex_replace('/.*$', '') }}"
+        port: 22
+        delay: 5
+        timeout: 600
+      loop: "{{ backup_nodes | default([]) }}"
+      when:
+        - pgbackrest_enabled | default(false) | bool
+        - (backup_nodes | default([]) | length) > 0
+
+    - name: Add Backup node to inventory group backup_nodes
+      ansible.builtin.add_host:
+        name: "{{ item.name }}"
+        ansible_host: "{{ item.ip | regex_replace('/.*$', '') }}"
+        ansible_user: "{{ cloud_init_user }}"
+        groups: "backup_nodes"
+      loop: "{{ backup_nodes | default([]) }}"
+      when:
+        - pgbackrest_enabled | default(false) | bool
+        - (backup_nodes | default([]) | length) > 0
+

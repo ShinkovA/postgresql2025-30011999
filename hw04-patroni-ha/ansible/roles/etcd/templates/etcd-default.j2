@@ -1,0 +1,20 @@
+# Managed by Ansible
+
+# IMPORTANT:
+# Ubuntu/Debian etcd packages sometimes start etcd with a config file that defaults to localhost.
+# We intentionally run etcd with environment-based configuration (ETCD_*) so it binds to the node IP.
+
+ETCD_NAME={{ inventory_hostname }}
+ETCD_DATA_DIR={{ etcd_data_dir }}
+
+ETCD_LISTEN_CLIENT_URLS=http://0.0.0.0:{{ etcd_client_port }}
+ETCD_LISTEN_PEER_URLS=http://0.0.0.0:{{ etcd_peer_port }}
+
+ETCD_ADVERTISE_CLIENT_URLS=http://{{ ansible_default_ipv4.address }}:{{ etcd_client_port }}
+ETCD_INITIAL_ADVERTISE_PEER_URLS=http://{{ ansible_default_ipv4.address }}:{{ etcd_peer_port }}
+
+ETCD_INITIAL_CLUSTER="{% for host in groups[etcd_cluster_group] -%}{{ host }}=http://{{ hostvars[host].ansible_default_ipv4.address }}:{{ etcd_peer_port }}{% if not loop.last %},{% endif %}{%- endfor %}"
+
+# On reruns, if the member dir exists, etcd must use 'existing' (otherwise it errors).
+ETCD_INITIAL_CLUSTER_STATE={{ etcd_initial_cluster_state | default('new') }}
+ETCD_INITIAL_CLUSTER_TOKEN={{ etcd_cluster_token }}

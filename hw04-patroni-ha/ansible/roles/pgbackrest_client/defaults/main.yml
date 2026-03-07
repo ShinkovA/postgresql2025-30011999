@@ -1,0 +1,26 @@
+---
+# Defaults for pgBackRest client role
+
+# Patroni/PostgreSQL data dir used by Patroni
+patroni_data_dir: "/data/patroni"
+
+# Enable/disable pgBackRest integration
+pgbackrest_enabled: false
+
+# Default stanza name (should match cluster)
+pgbackrest_stanza: "pgcluster"
+
+# NFS mount on PG nodes
+backup_nfs_client_mount: "/backup"
+
+# Repo path on PG nodes.
+# IMPORTANT: repo1-path is the mountpoint itself (no extra subdir),
+# otherwise the subdir ends up owned by root (0755) and postgres can't
+# create /archive and /backup during stanza-create.
+pgbackrest_repo_path: "{{ backup_nfs_client_mount }}"
+
+# Retention
+pgbackrest_retention_full: 7
+
+# NFS mount options (override from inventory/group_vars/all.yml if needed)
+backup_nfs_mount_opts: "rw,hard,timeo=600,retrans=2"

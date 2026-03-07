@@ -1,0 +1,56 @@
+# Managed by Ansible
+
+global
+  log /dev/log local0
+  log /dev/log local1 notice
+  maxconn 4096
+  user haproxy
+  group haproxy
+  daemon
+
+defaults
+  log     global
+  mode    tcp
+  option  tcplog
+  timeout connect 5s
+  timeout client  30s
+  timeout server  30s
+
+# -----------------------------------------------------------------------------
+# Primary (writes): connect to Patroni leader only
+# -----------------------------------------------------------------------------
+frontend pg_primary
+  bind *:{{ haproxy_primary_port }}
+  default_backend bk_pg_primary
+
+backend bk_pg_primary
+  option httpchk GET /primary
+  http-check expect status 200
+  default-server inter 2s fall 3 rise 2 on-marked-down shutdown-sessions
+{% for host in groups[patroni_cluster_group] %}
+  server {{ host }} {{ hostvars[host].ansible_host | default(hostvars[host].ansible_default_ipv4.address) }}:{{ patroni_postgres_port | default(5432) }} check port {{ patroni_restapi_port | default(8008) }}
+{% endfor %}
+
+# -----------------------------------------------------------------------------
+# Replicas (reads): connect to streaming replicas (round-robin)
+# -----------------------------------------------------------------------------
+frontend pg_replicas
+  bind *:{{ haproxy_replica_port }}
+  default_backend bk_pg_replicas
+
+backend bk_pg_replicas
+  balance roundrobin
+  option httpchk GET /replica
+  http-check expect status 200
+  default-server inter 2s fall 3 rise 2
+{% for host in groups[patroni_cluster_group] %}
+  server {{ host }} {{ hostvars[host].ansible_host | default(hostvars[host].ansible_default_ipv4.address) }}:{{ patroni_postgres_port | default(5432) }} check port {{ patroni_restapi_port | default(8008) }}
+{% endfor %}
+
+# Optional stats UI
+listen stats
+  bind *:7000
+  mode http
+  stats enable
+  stats uri /
+  stats refresh 10s

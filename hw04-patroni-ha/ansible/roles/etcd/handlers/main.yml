@@ -1,0 +1,7 @@
+---
+- name: Restart etcd
+  become: true
+  ansible.builtin.systemd:
+    name: etcd
+    state: restarted
+    daemon_reload: yes

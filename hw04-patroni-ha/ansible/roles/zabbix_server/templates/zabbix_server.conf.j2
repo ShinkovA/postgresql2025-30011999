@@ -1,0 +1,23 @@
+# Managed by Ansible
+
+############ GENERAL PARAMETERS #################
+
+LogFile=/var/log/zabbix/zabbix_server.log
+LogFileSize=0
+
+# PidFile должен совпадать с тем, что ожидает systemd-юнит
+PidFile=/run/zabbix/zabbix_server.pid
+
+AllowRoot=0
+
+############ DB SETTINGS ########################
+
+DBHost=localhost
+DBName={{ zabbix_db_name }}
+DBUser={{ zabbix_db_user }}
+DBPassword={{ zabbix_db_password }}
+DBPort=5432
+
+############ INCLUDE EXTRA CONFIGS ##############
+
+Include=/etc/zabbix/zabbix_server.conf.d/*.conf

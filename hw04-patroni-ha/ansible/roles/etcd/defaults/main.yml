@@ -1,0 +1,15 @@
+---
+# Настройки etcd-кластера
+
+etcd_cluster_name: "pg-etcd-cluster"
+etcd_cluster_token: "pg-etcd-token-1"
+
+# Порты
+etcd_client_port: 2379
+etcd_peer_port: 2380
+
+# Директория данных
+etcd_data_dir: "/var/lib/etcd"
+
+# Группа хостов кластера etcd
+etcd_cluster_group: "patroni_nodes"

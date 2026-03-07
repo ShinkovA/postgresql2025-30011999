@@ -1,0 +1,304 @@
+---
+- name: Create Patroni and Zabbix VMs on Proxmox
+  hosts: localhost
+  gather_facts: false
+  vars:
+    ansible_python_interpreter: /opt/ansible/patroni-cluster/.venv/bin/python
+    # Proxmox из env, с дефолтами
+    proxmox_api_host: "{{ lookup('env', 'PROXMOX_API_HOST') | default('pve01.mgmt.home.arpa', true) }}"
+    proxmox_api_user: "{{ lookup('env', 'PROXMOX_API_USER') | default('ansible@pve', true) }}"
+    proxmox_api_token_id: "{{ lookup('env', 'PROXMOX_API_TOKEN_ID') | default('semaphore', true) }}"
+    proxmox_api_token_secret: "{{ lookup('env', 'PROXMOX_API_TOKEN_SECRET') }}"
+    proxmox_node: "{{ lookup('env', 'PROXMOX_NODE') | default('domushnik', true) }}"
+    proxmox_storage: "{{ lookup('env', 'PROXMOX_STORAGE') | default('raid10', true) }}"
+    proxmox_template_vmid: "{{ lookup('env', 'PROXMOX_TEMPLATE_ID') | default('9100', true) }}"
+    proxmox_memory: "{{ lookup('env', 'PROXMOX_MEMORY') | default(4096, true) }}"
+    proxmox_cores: "{{ lookup('env', 'PROXMOX_CORES') | default(2, true) }}"
+
+    # Учётка внутри ВМ
+    patroni_ci_user: "{{ lookup('env', 'CI_USER') | default('aurus', true) }}"
+    # Берём сначала PATRONI_CI_PASSWORD, если нет — CI_PASSWORD
+    patroni_ci_password: >-
+      {{ lookup('env', 'PATRONI_CI_PASSWORD') | default(lookup('env', 'CI_PASSWORD'), true) }}
+
+    patroni_dns_servers:
+      - "{{ lookup('env', 'DNS_SERVER') | default('10.10.92.53', true) }}"
+    patroni_search_domains:
+      - "{{ lookup('env', 'SEARCH_DOMAIN') | default('prod.home.arpa', true) }}"
+
+    ##################################################################
+    # Patroni-ноды
+    ##################################################################
+    patroni_nodes:
+      - name: "pg-01.prod.home.arpa"
+        vmid: 201
+        ip: "10.10.92.101/24"
+        gw: "10.10.92.1"
+      - name: "pg-02.prod.home.arpa"
+        vmid: 202
+        ip: "10.10.92.102/24"
+        gw: "10.10.92.1"
+      - name: "pg-03.prod.home.arpa"
+        vmid: 203
+        ip: "10.10.92.103/24"
+        gw: "10.10.92.1"
+
+    ##################################################################
+    # Zabbix-нода
+    ##################################################################
+    zabbix_nodes:
+      - name: "zabbix.prod.home.arpa"
+        vmid: 210          # свободный VMID на Proxmox
+        ip: "10.10.92.110/24"
+        gw: "10.10.92.1"
+
+  tasks:
+
+    - name: Sanity check Proxmox and Patroni env vars
+      assert:
+        that:
+          - proxmox_api_host | length > 0
+          - proxmox_api_user | length > 0
+          - proxmox_api_token_id | length > 0
+          - proxmox_api_token_secret | length > 0
+          - patroni_ci_user | length > 0
+          - patroni_ci_password | length > 0
+          - lookup('file', '/root/.ssh/id_ed25519.pub') | length > 0
+        fail_msg: "One or more required vars/keys are missing"
+      tags: sanity
+
+    ##################################################################
+    # 1. Клонируем Patroni ВМ из шаблона
+    ##################################################################
+    - name: Clone Patroni VMs from template
+      community.proxmox.proxmox_kvm:
+        api_host: "{{ proxmox_api_host }}"
+        api_user: "{{ proxmox_api_user }}"
+        api_token_id: "{{ proxmox_api_token_id }}"
+        api_token_secret: "{{ proxmox_api_token_secret }}"
+        validate_certs: false
+
+        node: "{{ proxmox_node }}"
+
+        vmid: "{{ proxmox_template_vmid }}"
+        clone: "{{ item.name }}"
+        newid: "{{ item.vmid }}"
+        name: "{{ item.name }}"
+
+        storage: "{{ proxmox_storage }}"
+        memory: "{{ proxmox_memory }}"
+        cores: "{{ proxmox_cores }}"
+        full: true
+        onboot: true
+        state: present
+        timeout: 1800
+      loop: "{{ patroni_nodes }}"
+      loop_control:
+        label: "{{ item.name }}"
+      tags:
+        - clone
+        - patroni
+
+    ##################################################################
+    # 2. Настраиваем cloud-init для Patroni
+    ##################################################################
+    - name: Configure cloud-init + static IP + ssh keys on Patroni VMs
+      community.proxmox.proxmox_kvm:
+        api_host: "{{ proxmox_api_host }}"
+        api_user: "{{ proxmox_api_user }}"
+        api_token_id: "{{ proxmox_api_token_id }}"
+        api_token_secret: "{{ proxmox_api_token_secret }}"
+        validate_certs: false
+
+        node: "{{ proxmox_node }}"
+        vmid: "{{ item.vmid }}"
+
+        update: true
+        ipconfig:
+          ipconfig0: "ip={{ item.ip }},gw={{ item.gw }}"
+
+        nameservers: "{{ patroni_dns_servers }}"
+        searchdomains: "{{ patroni_search_domains }}"
+
+        ciuser: "{{ patroni_ci_user }}"
+        cipassword: "{{ patroni_ci_password }}"
+
+        sshkeys: "{{ lookup('file', '/root/.ssh/id_ed25519.pub') }}"
+      loop: "{{ patroni_nodes }}"
+      loop_control:
+        label: "{{ item.name }}"
+      tags:
+        - cloudinit
+        - patroni
+
+    ##################################################################
+    # 3. Стартуем Patroni ВМ
+    ##################################################################
+    - name: Start Patroni VMs
+      community.proxmox.proxmox_kvm:
+        api_host: "{{ proxmox_api_host }}"
+        api_user: "{{ proxmox_api_user }}"
+        api_token_id: "{{ proxmox_api_token_id }}"
+        api_token_secret: "{{ proxmox_api_token_secret }}"
+        validate_certs: false
+
+        node: "{{ proxmox_node }}"
+        vmid: "{{ item.vmid }}"
+        state: started
+      loop: "{{ patroni_nodes }}"
+      loop_control:
+        label: "{{ item.name }}"
+      tags:
+        - start
+        - patroni
+
+    ##################################################################
+    # 4. Ждём SSH на Patroni ВМ
+    ##################################################################
+    - name: Wait for SSH on Patroni nodes
+      wait_for:
+        host: "{{ item.ip.split('/')[0] }}"
+        port: 22
+        delay: 5
+        timeout: 600
+        state: started
+      loop: "{{ patroni_nodes }}"
+      loop_control:
+        label: "{{ item.name }}"
+      tags:
+        - wait_ssh
+        - patroni
+
+    ##################################################################
+    # 5. Добавляем Patroni ноды в инвентори-группу patroni_nodes
+    ##################################################################
+    - name: Add Patroni nodes to inventory group patroni_nodes
+      add_host:
+        name: "{{ item.name }}"
+        groups: patroni_nodes
+        ansible_host: "{{ item.ip.split('/')[0] }}"
+        ansible_user: "{{ patroni_ci_user }}"
+      loop: "{{ patroni_nodes }}"
+      loop_control:
+        label: "{{ item.name }}"
+      tags:
+        - add_inventory
+        - patroni
+
+    ##################################################################
+    # 6. Клонируем Zabbix ВМ из того же шаблона
+    ##################################################################
+    - name: Clone Zabbix VM from template
+      community.proxmox.proxmox_kvm:
+        api_host: "{{ proxmox_api_host }}"
+        api_user: "{{ proxmox_api_user }}"
+        api_token_id: "{{ proxmox_api_token_id }}"
+        api_token_secret: "{{ proxmox_api_token_secret }}"
+        validate_certs: false
+
+        node: "{{ proxmox_node }}"
+
+        vmid: "{{ proxmox_template_vmid }}"
+        clone: "{{ item.name }}"
+        newid: "{{ item.vmid }}"
+        name: "{{ item.name }}"
+
+        storage: "{{ proxmox_storage }}"
+        memory: "{{ proxmox_memory }}"     # 4 ГБ, как ты хотел
+        cores: "{{ proxmox_cores }}"       # 2 vCPU
+        full: true
+        onboot: true
+        state: present
+        timeout: 1800
+      loop: "{{ zabbix_nodes }}"
+      loop_control:
+        label: "{{ item.name }}"
+      tags:
+        - clone
+        - zabbix
+
+    ##################################################################
+    # 7. cloud-init для Zabbix
+    ##################################################################
+    - name: Configure cloud-init + static IP + ssh keys on Zabbix VM
+      community.proxmox.proxmox_kvm:
+        api_host: "{{ proxmox_api_host }}"
+        api_user: "{{ proxmox_api_user }}"
+        api_token_id: "{{ proxmox_api_token_id }}"
+        api_token_secret: "{{ proxmox_api_token_secret }}"
+        validate_certs: false
+
+        node: "{{ proxmox_node }}"
+        vmid: "{{ item.vmid }}"
+
+        update: true
+        ipconfig:
+          ipconfig0: "ip={{ item.ip }},gw={{ item.gw }}"
+
+        nameservers: "{{ patroni_dns_servers }}"
+        searchdomains: "{{ patroni_search_domains }}"
+
+        ciuser: "{{ patroni_ci_user }}"
+        cipassword: "{{ patroni_ci_password }}"
+
+        sshkeys: "{{ lookup('file', '/root/.ssh/id_ed25519.pub') }}"
+      loop: "{{ zabbix_nodes }}"
+      loop_control:
+        label: "{{ item.name }}"
+      tags:
+        - cloudinit
+        - zabbix
+
+    ##################################################################
+    # 8. Стартуем Zabbix ВМ
+    ##################################################################
+    - name: Start Zabbix VM
+      community.proxmox.proxmox_kvm:
+        api_host: "{{ proxmox_api_host }}"
+        api_user: "{{ proxmox_api_user }}"
+        api_token_id: "{{ proxmox_api_token_id }}"
+        api_token_secret: "{{ proxmox_api_token_secret }}"
+        validate_certs: false
+
+        node: "{{ proxmox_node }}"
+        vmid: "{{ item.vmid }}"
+        state: started
+      loop: "{{ zabbix_nodes }}"
+      loop_control:
+        label: "{{ item.name }}"
+      tags:
+        - start
+        - zabbix
+
+    ##################################################################
+    # 9. Ждём SSH на Zabbix
+    ##################################################################
+    - name: Wait for SSH on Zabbix VM
+      wait_for:
+        host: "{{ item.ip.split('/')[0] }}"
+        port: 22
+        delay: 5
+        timeout: 600
+        state: started
+      loop: "{{ zabbix_nodes }}"
+      loop_control:
+        label: "{{ item.name }}"
+      tags:
+        - wait_ssh
+        - zabbix
+
+    ##################################################################
+    # 10. Добавляем Zabbix в инвентори-группу zabbix_server
+    ##################################################################
+    - name: Add Zabbix VM to inventory group zabbix_server
+      add_host:
+        name: "{{ item.name }}"
+        groups: zabbix_server
+        ansible_host: "{{ item.ip.split('/')[0] }}"
+        ansible_user: "{{ patroni_ci_user }}"
+      loop: "{{ zabbix_nodes }}"
+      loop_control:
+        label: "{{ item.name }}"
+      tags:
+        - add_inventory
+        - zabbix

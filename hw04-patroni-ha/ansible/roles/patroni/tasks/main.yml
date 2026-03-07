@@ -1,0 +1,195 @@
+---
+# Tasks for Patroni role
+
+# Аналогично роли etcd: на свежеподнятых VM apt может быть занят cloud-init/apt-daily.
+- name: Wait for apt/dpkg locks to be released
+  shell: |
+    set -euo pipefail
+    locks=(
+      /var/lib/dpkg/lock-frontend
+      /var/lib/dpkg/lock
+      /var/lib/apt/lists/lock
+      /var/cache/apt/archives/lock
+    )
+    for _ in $(seq 1 180); do
+      busy=0
+      for l in "${locks[@]}"; do
+        if [ -e "$l" ] && fuser "$l" >/dev/null 2>&1; then
+          busy=1
+          break
+        fi
+      done
+      if [ "$busy" -eq 0 ]; then
+        exit 0
+      fi
+      sleep 5
+    done
+    echo "Timeout waiting for APT/DPKG locks (cloud-init/apt-daily may be running)" >&2
+    exit 1
+  args:
+    executable: /bin/bash
+  changed_when: false
+
+# Старые keyring'и PGDG в /etc/apt/keyrings нам не нужны, но на всякий случай чистим
+- name: Remove old PGDG keyrings in /etc/apt/keyrings (if any)
+  file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - /etc/apt/keyrings/postgresql.gpg
+    - /etc/apt/keyrings/postgresql.asc
+  failed_when: false
+
+# Базовые утилиты для работы с APT и GPG
+- name: Ensure tools for apt and gpg are installed
+  apt:
+    name:
+      - gnupg
+      - apt-transport-https
+      - ca-certificates
+    state: present
+    update_cache: yes
+    lock_timeout: 600
+
+# Каталог под keyring'и
+- name: Ensure /usr/share/keyrings exists
+  file:
+    path: /usr/share/keyrings
+    state: directory
+    mode: "0755"
+
+# Ключ PGDG – импортируем напрямую, без postgresql-archive-keyring
+- name: Install PGDG key into keyring
+  apt_key:
+    url: https://www.postgresql.org/media/keys/ACCC4CF8.asc
+    state: present
+
+# Репозиторий PGDG (без signed-by, чтобы не ловить конфликт опций)
+- name: Add PGDG APT repository
+  apt_repository:
+    repo: "deb https://apt.postgresql.org/pub/repos/apt {{ ansible_distribution_release }}-pgdg main"
+    state: present
+    filename: "pgdg"
+
+- name: Create APT pin for PGDG
+  copy:
+    dest: /etc/apt/preferences.d/pgdg.pref
+    content: |
+      Package: *
+      Pin: release o=PostgreSQL
+      Pin-Priority: 500
+
+- name: Update APT cache after adding PGDG
+  apt:
+    update_cache: yes
+    lock_timeout: 600
+
+- name: Install PostgreSQL packages from PGDG
+  apt:
+    name:
+      - postgresql-{{ postgresql_version }}
+      - postgresql-client-{{ postgresql_version }}
+      - postgresql-contrib-{{ postgresql_version }}
+    state: present
+    lock_timeout: 600
+
+- name: Ensure PostgreSQL systemd unit is stopped and disabled (managed by Patroni)
+  systemd:
+    name: postgresql
+    state: stopped
+    enabled: no
+
+
+- name: Drop default PostgreSQL cluster created by postgresql-common (if exists)
+  ansible.builtin.command: "pg_dropcluster --stop {{ postgresql_version }} main"
+  args:
+    removes: "/var/lib/postgresql/{{ postgresql_version }}/main/PG_VERSION"
+  changed_when: false
+  failed_when: false
+
+- name: Ensure Patroni package is installed
+  apt:
+    name: patroni
+    state: present
+    lock_timeout: 600
+
+- name: Stop Patroni before applying configuration (if auto-started by package)
+  systemd:
+    name: patroni
+    state: stopped
+  failed_when: false
+
+- name: Ensure /etc/patroni directory exists
+  file:
+    path: /etc/patroni
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Ensure Patroni PostgreSQL data directory exists
+  file:
+    path: "{{ patroni_data_dir }}"
+    state: directory
+    owner: postgres
+    group: postgres
+    mode: "0700"
+
+- name: Deploy patroni environment file
+  template:
+    src: patroni_env.conf.j2
+    dest: /etc/patroni_env.conf
+    owner: root
+    group: root
+    mode: "0640"
+  notify:
+    - Restart Patroni
+
+- name: Deploy Patroni configuration
+  template:
+    src: patroni.yml.j2
+    dest: /etc/patroni/patroni.yml
+    owner: postgres
+    group: postgres
+    mode: "0640"
+  notify:
+    - Restart Patroni
+
+- name: Deploy patronictl config
+  template:
+    src: patronictl.yml.j2
+    dest: /etc/patroni/patronictl.yml
+    owner: postgres
+    group: postgres
+    mode: "0640"
+
+- name: Deploy Patroni systemd unit (override distro unit)
+  template:
+    src: patroni.service.j2
+    dest: /etc/systemd/system/patroni.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify:
+    - Restart Patroni
+
+- name: Ensure Patroni log directory exists
+  file:
+    path: "{{ patroni_log_dir }}"
+    state: directory
+    owner: postgres
+    group: postgres
+    mode: "0755"
+
+- name: Ensure Patroni service is enabled and started
+  systemd:
+    name: patroni
+    enabled: yes
+    state: started
+    daemon_reload: yes
+
+- name: Wait for Patroni REST API port (8008) to open on this node
+  wait_for:
+    host: "{{ ansible_default_ipv4.address }}"
+    port: "{{ patroni_restapi_port | default(8008) }}"
+    timeout: 600

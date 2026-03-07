@@ -1,0 +1,34 @@
+---
+# Reinitialize a single unhealthy replica.
+# Expects variable `reinit_host`.
+
+- name: Stop patroni
+  ansible.builtin.systemd:
+    name: patroni
+    state: stopped
+  delegate_to: "{{ reinit_host }}"
+  become: true
+
+- name: Remove patroni data dir (replica only)
+  ansible.builtin.file:
+    path: "{{ hostvars[reinit_host].patroni_data_dir | default('/data/patroni') }}"
+    state: absent
+  delegate_to: "{{ reinit_host }}"
+  become: true
+
+- name: Recreate patroni data dir
+  ansible.builtin.file:
+    path: "{{ hostvars[reinit_host].patroni_data_dir | default('/data/patroni') }}"
+    state: directory
+    owner: postgres
+    group: postgres
+    mode: '0700'
+  delegate_to: "{{ reinit_host }}"
+  become: true
+
+- name: Start patroni
+  ansible.builtin.systemd:
+    name: patroni
+    state: started
+  delegate_to: "{{ reinit_host }}"
+  become: true

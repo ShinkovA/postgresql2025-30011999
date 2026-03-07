@@ -1,0 +1,33 @@
+# Managed by Ansible
+
+{# Backward-compatible var aliases (inventory may use *_name instead of *_user) #}
+{% set su_user = patroni_superuser_user | default(patroni_superuser_name | default('postgres')) %}
+{% set repl_user = patroni_replication_user | default(patroni_replication_name | default('replicator')) %}
+
+PATRONI_SCOPE="{{ patroni_scope }}"
+PATRONI_NAME="{{ inventory_hostname }}"
+PATRONI_NAMESPACE="{{ patroni_namespace }}"
+
+PATRONI_ETCD3_HOSTS="{% for host in groups[etcd_cluster_group | default('patroni_nodes')] -%}{{ hostvars[host].ansible_default_ipv4.address }}:{{ etcd_client_port | default(2379) }}{% if not loop.last %},{% endif %}{%- endfor %}"
+PATRONI_ETCD3_PROTOCOL="http"
+PATRONI_ETCD3_USERNAME=""
+PATRONI_ETCD3_PASSWORD=""
+
+PATRONI_RESTAPI_LISTEN="0.0.0.0:{{ patroni_restapi_port }}"
+PATRONI_RESTAPI_CONNECT_ADDRESS="{{ ansible_default_ipv4.address }}:{{ patroni_restapi_port }}"
+PATRONI_RESTAPI_USERNAME="{{ patroni_restapi_username }}"
+PATRONI_RESTAPI_PASSWORD="{{ patroni_restapi_password }}"
+
+PATRONI_SUPERUSER_USERNAME="{{ su_user }}"
+PATRONI_SUPERUSER_PASSWORD="{{ patroni_superuser_password }}"
+PATRONI_REPLICATION_USERNAME="{{ repl_user }}"
+PATRONI_REPLICATION_PASSWORD="{{ patroni_replication_password }}"
+
+PATRONI_LOG_LEVEL="{{ patroni_log_level }}"
+PATRONI_LOG_TYPE="{{ patroni_log_type }}"
+PATRONI_LOG_TRACEBACK_LEVEL="{{ patroni_log_traceback_level }}"
+PATRONI_LOG_DIR="{{ patroni_log_dir }}"
+PATRONI_LOG_FILE_NUM="{{ patroni_log_file_num }}"
+PATRONI_LOG_FILE_SIZE="{{ patroni_log_file_size }}"
+
+PGDATABASE="postgres"

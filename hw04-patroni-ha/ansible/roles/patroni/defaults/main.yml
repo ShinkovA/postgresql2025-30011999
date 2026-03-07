@@ -1,0 +1,33 @@
+---
+# Default variables for patroni role
+
+# PostgreSQL major version (Ubuntu packages: postgresql-<ver>)
+postgresql_version: 17
+
+patroni_scope: "pgcluster"
+patroni_namespace: "/pgcluster/"
+
+patroni_data_dir: "/data/patroni"
+patroni_bin_dir: "/usr/lib/postgresql/{{ postgresql_version }}/bin"
+
+# Patroni REST API (used by HAProxy health-checks and for operational checks)
+patroni_restapi_port: 8008
+
+# PostgreSQL port (connections to primary/replicas)
+patroni_postgres_port: 5432
+
+patroni_restapi_username: "patroni_restapi"
+patroni_restapi_password: "change_me_restapi"
+
+patroni_superuser_user: "postgres"
+patroni_superuser_password: "PostgresPasswordChangeMe"
+
+patroni_replication_user: "replicator"
+patroni_replication_password: "ReplicatorPasswordChangeMe"
+
+patroni_log_dir: "/var/log/patroni"
+patroni_log_level: "INFO"
+patroni_log_type: "plain"
+patroni_log_traceback_level: "ERROR"
+patroni_log_file_num: 5
+patroni_log_file_size: 10485760

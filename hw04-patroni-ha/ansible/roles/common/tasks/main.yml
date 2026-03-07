@@ -1,0 +1,51 @@
+---
+# Common baseline for fresh Ubuntu cloud-init VMs.
+# Goal: avoid random apt/dpkg lock errors by disabling apt timers and waiting for locks.
+
+- name: Stop apt timers/services that may hold dpkg lock (best-effort)
+  ansible.builtin.systemd:
+    name: "{{ item }}"
+    state: stopped
+    enabled: false
+    masked: true
+  loop:
+    - apt-daily.timer
+    - apt-daily-upgrade.timer
+    - apt-daily.service
+    - apt-daily-upgrade.service
+    - unattended-upgrades.service
+  ignore_errors: true
+
+- name: Wait until apt/dpkg locks are released
+  ansible.builtin.shell: |
+    set -euo pipefail
+    end=$((SECONDS+900))
+
+    is_locked() {
+      # util-linux 'lslocks' is present on Ubuntu by default
+      if command -v lslocks >/dev/null 2>&1; then
+        lslocks -n -o PATH 2>/dev/null | grep -qE '^(/var/lib/dpkg/lock-frontend|/var/lib/dpkg/lock|/var/lib/apt/lists/lock)$' && return 0 || true
+      fi
+
+      # fallback: look for typical apt processes
+      if pgrep -x apt-get >/dev/null 2>&1 || pgrep -x unattended-upgrade >/dev/null 2>&1 || pgrep -x apt >/dev/null 2>&1; then
+        return 0
+      fi
+
+      return 1
+    }
+
+    while [ $SECONDS -lt $end ]; do
+      if is_locked; then
+        sleep 5
+      else
+        exit 0
+      fi
+    done
+
+    echo "Timeout waiting for apt/dpkg locks" >&2
+    exit 1
+  args:
+    executable: /bin/bash
+  changed_when: false
+

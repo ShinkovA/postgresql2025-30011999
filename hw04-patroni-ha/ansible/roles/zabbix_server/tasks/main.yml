@@ -1,0 +1,240 @@
+---
+# Установка Zabbix server + локального PostgreSQL
+
+# На свежих VM apt может быть занят cloud-init/apt-daily — ждём освобождения locks.
+- name: Wait for apt/dpkg locks to be released
+  shell: |
+    set -euo pipefail
+    locks=(
+      /var/lib/dpkg/lock-frontend
+      /var/lib/dpkg/lock
+      /var/lib/apt/lists/lock
+      /var/cache/apt/archives/lock
+    )
+    for _ in $(seq 1 180); do
+      busy=0
+      for l in "${locks[@]}"; do
+        if [ -e "$l" ] && fuser "$l" >/dev/null 2>&1; then
+          busy=1
+          break
+        fi
+      done
+      if [ "$busy" -eq 0 ]; then
+        exit 0
+      fi
+      sleep 5
+    done
+    echo "Timeout waiting for APT/DPKG locks (cloud-init/apt-daily may be running)" >&2
+    exit 1
+  args:
+    executable: /bin/bash
+  changed_when: false
+
+- name: Ensure base packages are installed
+  apt:
+    name:
+      - wget
+      - gnupg
+      - ca-certificates
+      - acl
+      - gzip
+    state: present
+    update_cache: yes
+    lock_timeout: 600
+
+- name: Download Zabbix release .deb
+  get_url:
+    url: "{{ zabbix_release_deb_url }}"
+    dest: /tmp/zabbix-release.deb
+    mode: "0644"
+
+- name: Install Zabbix release package
+  apt:
+    deb: /tmp/zabbix-release.deb
+    state: present
+    lock_timeout: 600
+
+- name: Update apt cache after adding Zabbix repo
+  apt:
+    update_cache: yes
+    lock_timeout: 600
+
+- name: Install Zabbix server, frontend, agent and PostgreSQL
+  apt:
+    name:
+      - zabbix-server-pgsql
+      - zabbix-frontend-php
+      - zabbix-apache-conf
+      - zabbix-sql-scripts
+      - zabbix-agent
+      - postgresql
+      - postgresql-client
+      - postgresql-contrib
+      - php-pgsql          # чтобы фронтенд видел PostgreSQL
+    state: present
+    lock_timeout: 600
+
+- name: Ensure PostgreSQL service is enabled and started
+  systemd:
+    name: postgresql
+    state: started
+    enabled: yes
+
+# --- База данных Zabbix -------------------------------------------------------
+
+- name: Ensure Zabbix DB user exists
+  become_user: postgres
+  shell: |
+    psql -tc "SELECT 1 FROM pg_roles WHERE rolname='{{ zabbix_db_user }}'" | grep -q 1 \
+    || psql -c "CREATE USER {{ zabbix_db_user }} WITH PASSWORD '{{ zabbix_db_password }}';"
+  args:
+    executable: /bin/bash
+  register: zabbix_db_user_created
+  changed_when: zabbix_db_user_created.rc == 0 and zabbix_db_user_created.stdout == ""
+  failed_when: zabbix_db_user_created.rc != 0
+
+- name: Ensure Zabbix database exists
+  become_user: postgres
+  shell: |
+    psql -tc "SELECT 1 FROM pg_database WHERE datname='{{ zabbix_db_name }}'" | grep -q 1 \
+    || createdb -O {{ zabbix_db_user }} {{ zabbix_db_name }}
+  args:
+    executable: /bin/bash
+  register: zabbix_db_created
+  changed_when: zabbix_db_created.rc == 0 and zabbix_db_created.stdout == ""
+  failed_when: zabbix_db_created.rc != 0
+
+# --- Детект пути к PostgreSQL-схеме Zabbix -----------------------------------
+
+- name: Detect Zabbix server *PostgreSQL* schema file
+  shell: |
+    # Кандидаты для PostgreSQL схемы
+    for cand in \
+      /usr/share/zabbix/sql-scripts/postgresql/server.sql.gz \
+      /usr/share/zabbix/sql-scripts/postgresql/server.sql \
+      /usr/share/zabbix-sql-scripts/postgresql/server.sql.gz \
+      /usr/share/zabbix-sql-scripts/postgresql/server.sql \
+      /usr/share/doc/zabbix-server-pgsql*/create.sql.gz \
+      /usr/share/doc/zabbix-server-pgsql*/create.sql
+    do
+      if [ -f "$cand" ]; then
+        echo "$cand"
+        exit 0
+      fi
+    done
+
+    # Последний шанс: ищем только postgresql-вариант, mysql не трогаем
+    find /usr/share \
+      -maxdepth 6 \
+      -type f \
+      -path '*postgresql*server.sql*' 2>/dev/null | head -n1
+  args:
+    executable: /bin/bash
+  register: zbx_schema_file
+  changed_when: false
+
+- name: Fail if schema file not found
+  fail:
+    msg: "Could not find PostgreSQL Zabbix schema file (server.sql/server.sql.gz for pgsql). Got: '{{ zbx_schema_file.stdout | trim }}'"
+  when: zbx_schema_file.stdout | trim == ""
+
+# --- ИМПОРТ СХЕМЫ (разрушает БД при каждом запуске!) -------------------------
+
+# сначала глушим сервис, чтобы не держал коннекты к БД
+- name: Stop Zabbix server before schema import (if running)
+  systemd:
+    name: zabbix-server
+    state: stopped
+  failed_when: false
+  changed_when: false
+
+- name: Recreate Zabbix database and load schema (DESTRUCTIVE on {{ zabbix_db_name }})
+  become_user: postgres
+  shell: |
+    set -e
+
+    SCHEMA="{{ zbx_schema_file.stdout | trim }}"
+    echo "Using schema file: $SCHEMA"
+
+    # На всякий случай убиваем все существующие сессии к zabbix
+    psql -d postgres -Atc "
+      SELECT pg_terminate_backend(pid)
+      FROM pg_stat_activity
+      WHERE datname = '{{ zabbix_db_name }}'
+        AND pid <> pg_backend_pid();
+    " || true
+
+    # Полностью пересоздаём базу
+    dropdb --if-exists {{ zabbix_db_name }}
+    createdb -O {{ zabbix_db_user }} {{ zabbix_db_name }}
+
+    case "$SCHEMA" in
+      *.gz)
+        gzip -dc "$SCHEMA" | psql -v ON_ERROR_STOP=1 -d {{ zabbix_db_name }}
+        ;;
+      *)
+        psql -v ON_ERROR_STOP=1 -d {{ zabbix_db_name }} -f "$SCHEMA"
+        ;;
+    esac
+  args:
+    executable: /bin/bash
+  register: zbx_schema
+  changed_when: true
+  failed_when: zbx_schema.rc != 0
+
+- name: Fix privileges for Zabbix DB user
+  become_user: postgres
+  shell: |
+    set -e
+    # Права на подключение и схему
+    psql -v ON_ERROR_STOP=1 -d {{ zabbix_db_name }} -c "GRANT CONNECT ON DATABASE {{ zabbix_db_name }} TO {{ zabbix_db_user }};"
+    psql -v ON_ERROR_STOP=1 -d {{ zabbix_db_name }} -c "GRANT USAGE ON SCHEMA public TO {{ zabbix_db_user }};"
+    # Права на все объекты в public
+    psql -v ON_ERROR_STOP=1 -d {{ zabbix_db_name }} -c "GRANT ALL PRIVILEGES ON ALL TABLES    IN SCHEMA public TO {{ zabbix_db_user }};"
+    psql -v ON_ERROR_STOP=1 -d {{ zabbix_db_name }} -c "GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO {{ zabbix_db_user }};"
+    psql -v ON_ERROR_STOP=1 -d {{ zabbix_db_name }} -c "GRANT ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA public TO {{ zabbix_db_user }};"
+  args:
+    executable: /bin/bash
+
+- name: Check that Zabbix schema has 'users' table
+  become_user: postgres
+  shell: |
+    psql -d {{ zabbix_db_name }} -Atc "SELECT 1 FROM pg_tables WHERE tablename='users'" 2>/dev/null | tr -d '[:space:]'
+  args:
+    executable: /bin/bash
+  register: zbx_users_table
+  changed_when: false
+  failed_when: zbx_users_table.stdout | trim != '1'
+
+# --- Конфиг Zabbix server -----------------------------------------------------
+
+- name: Ensure zabbix_server.conf.d directory exists
+  file:
+    path: /etc/zabbix/zabbix_server.conf.d
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Deploy zabbix_server.conf
+  template:
+    src: zabbix_server.conf.j2
+    dest: /etc/zabbix/zabbix_server.conf
+    owner: root
+    group: root
+    mode: "0640"
+  notify:
+    - Restart Zabbix server
+    - Restart Apache
+
+# --- Сервисы -------------------------------------------------------------------
+
+- name: Ensure Zabbix server, agent and Apache are enabled and started
+  systemd:
+    name: "{{ item }}"
+    state: started
+    enabled: yes
+  loop:
+    - zabbix-server
+    - zabbix-agent
+    - apache2

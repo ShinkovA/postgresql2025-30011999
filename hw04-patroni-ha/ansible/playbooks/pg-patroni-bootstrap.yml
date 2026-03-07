@@ -1,0 +1,63 @@
+---
+- name: Reset and configure etcd + Patroni + PostgreSQL
+  hosts: patroni_nodes
+  become: yes
+
+  vars:
+    # Жёсткий ресет всего кластера (ОПАСНО: удаляет данные). Для свежих ВМ не нужен.
+    # Включать явно через -e patroni_full_reset=true
+    patroni_full_reset: false
+
+    patroni_data_dir: "/data/patroni"
+    etcd_data_dir: "/var/lib/etcd"
+
+  pre_tasks:
+    - name: "RESET: stop patroni"
+      systemd:
+        name: patroni
+        state: stopped
+        enabled: no
+      ignore_errors: yes
+      when: patroni_full_reset
+
+    - name: "RESET: stop etcd"
+      systemd:
+        name: etcd
+        state: stopped
+        enabled: no
+      ignore_errors: yes
+      when: patroni_full_reset
+
+    - name: "RESET: wipe Patroni data dir"
+      file:
+        path: "{{ patroni_data_dir }}"
+        state: absent
+      when: patroni_full_reset
+
+    - name: "RESET: wipe etcd data dir"
+      file:
+        path: "{{ etcd_data_dir }}"
+        state: absent
+      when: patroni_full_reset
+
+    - name: "RESET: recreate etcd data dir"
+      file:
+        path: "{{ etcd_data_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0700"
+      when: patroni_full_reset
+
+    - name: "RESET: recreate Patroni data dir"
+      file:
+        path: "{{ patroni_data_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0700"
+      when: patroni_full_reset
+
+  roles:
+    - etcd
+    - patroni

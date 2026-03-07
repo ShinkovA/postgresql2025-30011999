@@ -1,0 +1,2 @@
+# Managed by Ansible
+{{ backup_nfs_export }} {% for host in groups[patroni_cluster_group] %}{{ hostvars[host].ansible_host | default(hostvars[host].ansible_default_ipv4.address) }}(rw,sync,no_subtree_check,no_root_squash){% if not loop.last %} {% endif %}{% endfor %}

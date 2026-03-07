@@ -1,0 +1,173 @@
+---
+- name: Finalize Patroni cluster (ensure users + recover replicas if needed)
+  hosts: localhost
+  gather_facts: false
+
+  vars:
+    patroni_api_port: "{{ hostvars[groups[patroni_cluster_group][0]].patroni_restapi_port | default(8008) }}"
+
+  tasks:
+    - name: Wait for Patroni REST API on all nodes (best-effort)
+      ansible.builtin.uri:
+        url: "http://{{ hostvars[item].ansible_host | default(item) }}:{{ patroni_api_port }}/health"
+        status_code: [200, 503]
+        timeout: 5
+      loop: "{{ groups[patroni_cluster_group] }}"
+      register: patroni_health
+      changed_when: false
+      failed_when: false
+
+    - name: Detect Patroni leader via /primary
+      ansible.builtin.uri:
+        url: "http://{{ hostvars[item].ansible_host | default(item) }}:{{ patroni_api_port }}/primary"
+        status_code: [200, 503]
+        timeout: 5
+      loop: "{{ groups[patroni_cluster_group] }}"
+      register: patroni_primary
+      changed_when: false
+      failed_when: false
+
+    - name: Set leader hostname
+      ansible.builtin.set_fact:
+        patroni_leader_host: "{{ (patroni_primary.results | selectattr('status','equalto',200) | map(attribute='item') | list | first) | default('') }}"
+      changed_when: false
+
+    - name: Fail if no leader found
+      ansible.builtin.fail:
+        msg: "Could not detect Patroni leader via REST API /primary. Check patroni.service and firewall."
+      when: patroni_leader_host == ''
+
+    - name: Ensure replication/rewind roles exist on leader (idempotent)
+      ansible.builtin.shell: |
+        set -euo pipefail
+        sudo -u postgres psql -v ON_ERROR_STOP=1 <<'SQL'
+        DO $$
+        BEGIN
+          IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='{{ hostvars[patroni_leader_host].patroni_replication_username | default('replicator') }}') THEN
+            CREATE ROLE {{ hostvars[patroni_leader_host].patroni_replication_username | default('replicator') }} WITH LOGIN REPLICATION PASSWORD '{{ hostvars[patroni_leader_host].patroni_replication_password | default('ReplicatorPasswordChangeMe') }}';
+          ELSE
+            ALTER ROLE {{ hostvars[patroni_leader_host].patroni_replication_username | default('replicator') }} WITH LOGIN REPLICATION PASSWORD '{{ hostvars[patroni_leader_host].patroni_replication_password | default('ReplicatorPasswordChangeMe') }}';
+          END IF;
+
+          IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='{{ hostvars[patroni_leader_host].patroni_rewind_username | default('rewind') }}') THEN
+            CREATE ROLE {{ hostvars[patroni_leader_host].patroni_rewind_username | default('rewind') }} WITH LOGIN REPLICATION PASSWORD '{{ hostvars[patroni_leader_host].patroni_rewind_password | default('RewindPasswordChangeMe') }}';
+          ELSE
+            ALTER ROLE {{ hostvars[patroni_leader_host].patroni_rewind_username | default('rewind') }} WITH LOGIN REPLICATION PASSWORD '{{ hostvars[patroni_leader_host].patroni_rewind_password | default('RewindPasswordChangeMe') }}';
+          END IF;
+        END$$;
+        SQL
+      args:
+        executable: /bin/bash
+      delegate_to: "{{ patroni_leader_host }}"
+      become: true
+      changed_when: false
+
+    - name: Ensure detected leader is really PRIMARY (pg_is_in_recovery = false)
+      ansible.builtin.shell: |
+        set -euo pipefail
+        sudo -u postgres psql -tAc "select pg_is_in_recovery();" | tr -d '[:space:]'
+      args:
+        executable: /bin/bash
+      delegate_to: "{{ patroni_leader_host }}"
+      become: true
+      register: leader_recovery_state
+      changed_when: false
+
+    - name: Fail if detected leader is in recovery (pgBackRest stanza-create must run on primary)
+      ansible.builtin.fail:
+        msg: >-
+          Patroni leader detection returned {{ patroni_leader_host }}, but PostgreSQL on that node is in recovery.
+          This breaks pgBackRest stanza-create/backup (it expects a primary).
+          Check Patroni state on any node:
+            sudo patronictl -c /etc/patroni/patroni.yml list
+      when: (leader_recovery_state.stdout | trim) != 'f'
+
+    - name: Wait a bit for replicas to become healthy on their own
+      ansible.builtin.uri:
+        url: "http://{{ hostvars[item].ansible_host | default(item) }}:{{ patroni_api_port }}/replica"
+        status_code: [200, 503]
+        timeout: 5
+      register: replica_probe
+      retries: 30
+      delay: 2
+      until: replica_probe.status == 200 or item == patroni_leader_host
+      loop: "{{ groups[patroni_cluster_group] }}"
+      changed_when: false
+      failed_when: false
+
+    - name: Build replica probe status map
+      ansible.builtin.set_fact:
+        replica_probe_results: "{{ replica_probe.results | items2dict(key_name='item', value_name='status') }}"
+      changed_when: false
+
+    - name: Reinitialize unhealthy replicas (wipe data_dir and restart patroni)
+      ansible.builtin.include_tasks: tasks/reinit_replica.yml
+      loop: "{{ groups[patroni_cluster_group] }}"
+      loop_control:
+        loop_var: reinit_host
+      when:
+        - reinit_host != patroni_leader_host
+        - (replica_probe_results[reinit_host] | default(503)) != 200
+
+    - name: Wait for replicas to report /replica = 200
+      ansible.builtin.uri:
+        url: "http://{{ hostvars[item].ansible_host | default(item) }}:{{ patroni_api_port }}/replica"
+        status_code: [200, 503]
+        timeout: 5
+      register: replica_final
+      retries: 60
+      delay: 2
+      until: replica_final.status == 200 or item == patroni_leader_host
+      loop: "{{ groups[patroni_cluster_group] }}"
+      changed_when: false
+      failed_when: false
+
+    - name: Initialize pgBackRest stanza on leader (if enabled)
+      ansible.builtin.shell: |
+        set -euo pipefail
+
+        REPO="{{ hostvars[patroni_leader_host].pgbackrest_repo_path | default('/backup') }}"
+
+        STANZA="{{ hostvars[patroni_leader_host].pgbackrest_stanza | default(hostvars[patroni_leader_host].patroni_scope | default('pgcluster')) }}"
+
+        INFO_FILE="${REPO}/backup/${STANZA}/backup.info"
+        INFO_FILE_COPY="${REPO}/backup/${STANZA}/backup.info.copy"
+
+        # If stanza was already created (info files exist), do nothing
+        if [[ -f "$INFO_FILE" || -f "$INFO_FILE_COPY" ]]; then
+          exit 0
+        fi
+
+        # Create stanza and validate that pgBackRest produced backup.info
+        sudo -u postgres pgbackrest --stanza="$STANZA" --log-level-console=info stanza-create
+
+        if [[ ! -f "$INFO_FILE" && ! -f "$INFO_FILE_COPY" ]]; then
+          echo "ERROR: stanza-create finished but backup.info is still missing: $INFO_FILE" >&2
+          sudo -u postgres pgbackrest --stanza="$STANZA" --log-level-console=info info || true
+          exit 55
+        fi
+      args:
+        executable: /bin/bash
+      delegate_to: "{{ patroni_leader_host }}"
+      become: true
+      changed_when: false
+      when: hostvars[patroni_leader_host].pgbackrest_enabled | default(false) | bool
+
+    - name: Run initial full pgBackRest backup on leader (if enabled)
+      ansible.builtin.shell: |
+        set -euo pipefail
+        STANZA="{{ hostvars[patroni_leader_host].pgbackrest_stanza | default(hostvars[patroni_leader_host].patroni_scope | default('pgcluster')) }}"
+        sudo -u postgres pgbackrest --stanza="$STANZA" --type=full backup
+      args:
+        executable: /bin/bash
+      delegate_to: "{{ patroni_leader_host }}"
+      become: true
+      changed_when: false
+      when: hostvars[patroni_leader_host].pgbackrest_enabled | default(false) | bool
+
+    - name: Show cluster endpoints reminder
+      ansible.builtin.debug:
+        msg: |
+          Patroni leader: {{ patroni_leader_host }} ({{ hostvars[patroni_leader_host].ansible_host | default(patroni_leader_host) }})
+          HAProxy primary (writes): {{ hostvars[groups['haproxy_nodes'][0]].ansible_host | default(groups['haproxy_nodes'][0]) }}:{{ hostvars[groups['haproxy_nodes'][0]].haproxy_primary_port | default(5432) }}
+          HAProxy replicas (reads): {{ hostvars[groups['haproxy_nodes'][0]].ansible_host | default(groups['haproxy_nodes'][0]) }}:{{ hostvars[groups['haproxy_nodes'][0]].haproxy_replica_port | default(5433) }}

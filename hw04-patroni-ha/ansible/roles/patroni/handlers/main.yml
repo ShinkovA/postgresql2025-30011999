@@ -1,0 +1,11 @@
+---
+- name: Restart Patroni
+  systemd:
+    name: patroni
+    state: restarted
+    daemon_reload: yes
+
+- name: Restart PostgreSQL 17
+  systemd:
+    name: postgresql@17-main
+    state: restarted

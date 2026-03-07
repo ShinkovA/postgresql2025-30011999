@@ -1,0 +1,12 @@
+# Managed by Ansible
+[Unit]
+Description=pgBackRest backup (runs only on Patroni leader)
+After=network-online.target patroni.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/pgbackrest-backup-if-primary.sh
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,72 @@
+# Managed by Ansible
+
+{# Backward-compatible var aliases (inventory may use *_name instead of *_user) #}
+{% set su_user = patroni_superuser_user | default(patroni_superuser_name | default('postgres')) %}
+{% set repl_user = patroni_replication_user | default(patroni_replication_name | default('replicator')) %}
+
+scope: "{{ patroni_scope }}"
+namespace: "{{ patroni_namespace }}"
+name: "{{ inventory_hostname }}"
+
+restapi:
+  listen: 0.0.0.0:{{ patroni_restapi_port }}
+  connect_address: "{{ ansible_default_ipv4.address }}:{{ patroni_restapi_port }}"
+
+etcd3:
+  protocol: http
+  hosts: "{% for host in groups[etcd_cluster_group | default('patroni_nodes')] -%}{{ hostvars[host].ansible_default_ipv4.address }}:{{ etcd_client_port | default(2379) }}{% if not loop.last %},{% endif %}{%- endfor %}"
+
+bootstrap:
+  dcs:
+    ttl: 30
+    loop_wait: 10
+    retry_timeout: 10
+    maximum_lag_on_failover: 1048576
+    postgresql:
+      use_pg_rewind: true
+      use_slots: true
+      parameters:
+        wal_level: replica
+        hot_standby: "on"
+        wal_log_hints: "on"
+        max_wal_senders: 10
+        max_replication_slots: 10
+        wal_keep_size: 1024MB
+{% if pgbackrest_enabled | default(false) %}
+        archive_mode: "on"
+        archive_command: "pgbackrest --stanza={{ pgbackrest_stanza | default(patroni_scope) }} archive-push %p"
+        archive_timeout: 60s
+        restore_command: "pgbackrest --stanza={{ pgbackrest_stanza | default(patroni_scope) }} archive-get %f \"%p\""
+{% endif %}
+  initdb:
+    - encoding: UTF8
+    - data-checksums
+  users:
+    {{ su_user }}:
+      password: "{{ patroni_superuser_password }}"
+      options:
+        - SUPERUSER
+        - CREATEDB
+    {{ repl_user }}:
+      password: "{{ patroni_replication_password }}"
+      options:
+        - REPLICATION
+
+postgresql:
+  listen: 0.0.0.0:{{ patroni_postgres_port }}
+  connect_address: "{{ ansible_default_ipv4.address }}:{{ patroni_postgres_port }}"
+  data_dir: "{{ patroni_data_dir }}"
+  bin_dir: "{{ patroni_bin_dir }}"
+
+  pg_hba:
+    - "local all all peer"
+    - "host all all 0.0.0.0/0 scram-sha-256"
+    - "host replication {{ repl_user }} 0.0.0.0/0 scram-sha-256"
+
+  authentication:
+    superuser:
+      username: "{{ su_user }}"
+      password: "{{ patroni_superuser_password }}"
+    replication:
+      username: "{{ repl_user }}"
+      password: "{{ patroni_replication_password }}"

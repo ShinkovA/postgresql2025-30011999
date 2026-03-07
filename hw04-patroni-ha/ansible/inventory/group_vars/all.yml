@@ -1,0 +1,127 @@
+# -----------------------------------------------------------------------------
+# Homework: Patroni HA
+#  - 3x etcd VMs
+#  - 3x PostgreSQL/Patroni VMs
+#  - 1x HAProxy VM
+#  - 1x Backup VM (NFS + pgBackRest repository)
+# IP range requested: 10.10.92.112 - 10.10.92.119
+# -----------------------------------------------------------------------------
+
+# --- VM definitions -----------------------------------------------------------
+
+etcd_nodes:
+  - name: etcd-01.prod.home.arpa
+    vmid: 6101
+    ip: 10.10.92.112/24
+    gw: 10.10.92.1
+  - name: etcd-02.prod.home.arpa
+    vmid: 6102
+    ip: 10.10.92.113/24
+    gw: 10.10.92.1
+  - name: etcd-03.prod.home.arpa
+    vmid: 6103
+    ip: 10.10.92.114/24
+    gw: 10.10.92.1
+
+patroni_nodes:
+  - name: pg-01.prod.home.arpa
+    vmid: 6201
+    ip: 10.10.92.115/24
+    gw: 10.10.92.1
+  - name: pg-02.prod.home.arpa
+    vmid: 6202
+    ip: 10.10.92.116/24
+    gw: 10.10.92.1
+  - name: pg-03.prod.home.arpa
+    vmid: 6203
+    ip: 10.10.92.117/24
+    gw: 10.10.92.1
+
+haproxy_nodes:
+  - name: haproxy-01.prod.home.arpa
+    vmid: 6301
+    ip: 10.10.92.118/24
+    gw: 10.10.92.1
+
+backup_nodes:
+  - name: backup-01.prod.home.arpa
+    vmid: 6401
+    ip: 10.10.92.119/24
+    gw: 10.10.92.1
+
+# --- Proxmox (template) -------------------------------------------------------
+# NOTE: Proxmox connection is configured via environment variables.
+# See README.md for required variables.
+
+proxmox_node: "{{ lookup('env','PROXMOX_NODE') | default('domushnik', true) }}"
+proxmox_storage: "{{ lookup('env','PROXMOX_STORAGE') | default('hdd-vmdata', true) }}"
+# Optional: dedicated storage for backup-01 extra disk
+proxmox_backup_storage: "{{ lookup('env','PROXMOX_BACKUP_STORAGE') | default(proxmox_storage, true) }}"
+proxmox_template_vmid: "{{ (lookup('env','PROXMOX_TEMPLATE_ID') | default('9100', true)) | int }}"
+
+# --- Cloud-init ---------------------------------------------------------------
+
+cloud_init_user: "{{ lookup('env','CI_USER') | default('aurus', true) }}"
+cloud_init_ssh_public_key: "{{ lookup('env', 'CLOUD_INIT_SSH_PUBLIC_KEY') | default('', true) }}"
+
+# --- Cluster config -----------------------------------------------------------
+
+# Inventory group names used by roles (do not change unless you know why)
+etcd_cluster_group: "etcd_nodes"
+patroni_cluster_group: "patroni_nodes"
+
+# Patroni
+patroni_cluster_name: "pgcluster"
+patroni_scope: "{{ patroni_cluster_name }}"
+postgresql_version: 17
+patroni_restapi_port: 8008
+
+# PostgreSQL port for client connections (leader/replicas)
+patroni_postgres_port: 5432
+
+# HAProxy
+haproxy_primary_port: 5432
+haproxy_replica_port: 5433
+
+# Reset (optional): run with --tags reset
+reset_cluster: false
+
+# Optional backups (disabled by default)
+walg_enabled: false
+
+# --- Backups: pgBackRest + NFS repo on backup-01 ------------------------------
+pgbackrest_enabled: true
+pgbackrest_stanza: "{{ patroni_cluster_name }}"
+
+# Backup disk size (GB) for backup-01. Overridable via env BACKUP_DISK_SIZE_GB.
+backup_disk_size_gb: "{{ lookup('env','BACKUP_DISK_SIZE_GB') | default(200, true) | int }}"
+
+# Where the 2nd disk will be mounted on backup-01
+backup_mount_point: "/srv/pgbackups"
+
+# NFS export from backup-01
+backup_nfs_export: "{{ backup_mount_point }}"
+
+# Where PG nodes mount the NFS repo
+backup_nfs_client_mount: "/backup"
+
+# pgBackRest repository path (on PG nodes)
+pgbackrest_repo_path: "{{ backup_nfs_client_mount }}/pgbackrest"
+
+# Retention policy
+pgbackrest_retention_full: 7
+
+
+# DNS
+dns_server: "{{ lookup('env','DNS_SERVER') | default('10.10.92.53', true) }}"
+search_domain: "{{ lookup('env','SEARCH_DOMAIN') | default('prod.home.arpa', true) }}"
+
+# Cloud-init
+cloud_init_password: "{{ lookup('env','CI_PASSWORD') | default('', true) }}"
+# cloud_init_ssh_public_key moved to the Cloud-init section below (avoid duplicate YAML keys)
+
+# SSH defaults
+ansible_user: "{{ cloud_init_user }}"
+
+# Provision VMs in Proxmox (set false to reuse existing VMs)
+provision_vms: true

@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+PATRONI_PORT="{{ patroni_restapi_port | default(8008) }}"
+STANZA="{{ pgbackrest_stanza }}"
+
+code=$(curl -s -o /dev/null -w "%{http_code}" "http://127.0.0.1:${PATRONI_PORT}/primary" || true)
+if [[ "$code" != "200" ]]; then
+  # not a leader, do nothing
+  exit 0
+fi
+
+exec sudo -u postgres pgbackrest --stanza="${STANZA}" --type=full backup

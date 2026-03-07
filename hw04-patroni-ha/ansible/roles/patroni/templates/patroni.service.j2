@@ -1,0 +1,19 @@
+# Managed by Ansible
+[Unit]
+Description=Patroni PostgreSQL HA cluster node
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=postgres
+Group=postgres
+EnvironmentFile=-/etc/patroni_env.conf
+Environment="PATRONI_CONFIG_FILE=/etc/patroni/patroni.yml"
+ExecStart=/usr/bin/patroni /etc/patroni/patroni.yml
+Restart=on-failure
+TimeoutStopSec=60
+TimeoutStartSec=0
+
+[Install]
+WantedBy=multi-user.target

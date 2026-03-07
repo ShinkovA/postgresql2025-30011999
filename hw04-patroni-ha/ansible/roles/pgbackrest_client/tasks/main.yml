@@ -1,0 +1,79 @@
+---
+# pgBackRest client role: mounts NFS repo, installs pgbackrest and sets timer.
+
+- name: Install packages for pgBackRest + NFS client
+  ansible.builtin.apt:
+    name:
+      - nfs-common
+      - pgbackrest
+      - curl
+    # IMPORTANT: use latest so that, after PGDG repo is added by the Patroni role,
+    # we upgrade pgBackRest to a version that supports the selected PostgreSQL version (e.g. PG17).
+    state: latest
+    update_cache: yes
+
+- name: Ensure backup mount point exists
+  ansible.builtin.file:
+    path: "{{ backup_nfs_client_mount }}"
+    state: directory
+    mode: "0755"
+
+- name: Mount NFS backup repo from backup server
+  ansible.posix.mount:
+    path: "{{ backup_nfs_client_mount }}"
+    src: "{{ hostvars[groups['backup_nodes'][0]].ansible_host | default(hostvars[groups['backup_nodes'][0]].ansible_default_ipv4.address) }}:{{ backup_nfs_export }}"
+    fstype: nfs
+    opts: "{{ backup_nfs_mount_opts }},_netdev"
+    state: mounted
+
+# repo1-path is the mountpoint itself (see defaults), so do NOT create
+# any subdirectory here (it would be owned by root and block stanza-create).
+
+- name: Ensure pgBackRest config directory exists
+  ansible.builtin.file:
+    path: /etc/pgbackrest
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Deploy pgBackRest config
+  ansible.builtin.template:
+    src: pgbackrest.conf.j2
+    dest: /etc/pgbackrest/pgbackrest.conf
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Deploy leader-only backup script
+  ansible.builtin.template:
+    src: pgbackrest-backup-if-primary.sh.j2
+    dest: /usr/local/bin/pgbackrest-backup-if-primary.sh
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Deploy systemd service for pgBackRest backups
+  ansible.builtin.template:
+    src: pgbackrest-backup.service.j2
+    dest: /etc/systemd/system/pgbackrest-backup.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Reload systemd
+
+- name: Deploy systemd timer for pgBackRest backups
+  ansible.builtin.template:
+    src: pgbackrest-backup.timer.j2
+    dest: /etc/systemd/system/pgbackrest-backup.timer
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Reload systemd
+
+- name: Enable and start pgBackRest backup timer
+  ansible.builtin.systemd:
+    name: pgbackrest-backup.timer
+    enabled: true
+    state: started
+    daemon_reload: true

@@ -1,0 +1,18 @@
+---
+- name: Configure backup server (NFS repo for pgBackRest)
+  hosts: backup_nodes
+  become: true
+  gather_facts: true
+
+  pre_tasks:
+    - name: Wait for cloud-init to finish (avoids apt/dpkg locks)
+      ansible.builtin.wait_for:
+        path: /var/lib/cloud/instance/boot-finished
+        timeout: 900
+      changed_when: false
+      failed_when: false
+
+  roles:
+    - common
+    - role: backup_server
+      when: pgbackrest_enabled | default(false) | bool

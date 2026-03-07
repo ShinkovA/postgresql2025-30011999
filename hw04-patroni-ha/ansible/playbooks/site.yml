@@ -1,0 +1,8 @@
+---
+- import_playbook: create_infra_vms.yml
+- import_playbook: configure_backup_server.yml
+- import_playbook: configure_etcd_cluster.yml
+- import_playbook: configure_patroni_cluster.yml
+- import_playbook: configure_haproxy.yml
+- import_playbook: finalize_patroni_cluster.yml
+
