@@ -276,14 +276,7 @@ sudo -u postgres pgbackrest --stanza=pgcluster info
 
 ---
 
-## 9) Безопасность
-
-* **Не коммитить `env.sh`** (там токены/пароли).
-* В репозиторий — только `env.example.sh` без секретов.
-
----
-
-## 10) Troubleshooting (коротко)
+## 9) Troubleshooting (коротко)
 
 * `401 Unauthorized: invalid token value` → неправильный `PROXMOX_API_TOKEN_SECRET`
 * `Missing required env vars` → не экспортированы переменные (особенно `CLOUD_INIT_SSH_PUBLIC_KEY`)
