@@ -1,4 +1,3 @@
-````markdown
 # HW04 — Patroni HA (3x etcd, 3x PostgreSQL/Patroni, HAProxy) + pgBackRest (NFS repo)
 
 Домашнее задание: **Высокая доступность: развертывание Patroni**  
@@ -76,7 +75,7 @@
 cd hw04-patroni-ha/ansible
 ./bootstrap.sh
 source .venv/bin/activate
-````
+
 
 ### 3.2 Переменные окружения (env.sh)
 
