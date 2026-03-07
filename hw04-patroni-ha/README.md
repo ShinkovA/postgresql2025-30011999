@@ -1,7 +1,8 @@
+````markdown
 # HW04 — Patroni HA (3x etcd, 3x PostgreSQL/Patroni, HAProxy) + pgBackRest (NFS repo)
 
 Домашнее задание: **Высокая доступность: развертывание Patroni**  
-Цель: развернуть отказоустойчивый кластер PostgreSQL с Patroni + проверка failover + бэкапы.
+Цель: развернуть отказоустойчивый кластер PostgreSQL с Patroni + проверить failover + настроить бэкапы.
 
 ---
 
@@ -24,6 +25,10 @@
   - `:7000` → stats UI
 - etcd: `:2379` (client)
 - NFS: `:2049` (backup server)
+
+### Виртуальные машины в Proxmox
+
+![Proxmox: список ВМ](screens/01_proxmox_vms.PNG)
 
 ---
 
@@ -53,7 +58,7 @@
 - Python 3 + venv
 - Доступ по сети до Proxmox API
 - SSH ключ (`~/.ssh/id_ed25519.pub`) — будет прокинут в ВМ через cloud-init
-- DNS (или /etc/hosts), чтобы резолвились имена `*.prod.home.arpa`  
+- DNS (или /etc/hosts), чтобы резолвились имена `*.prod.home.arpa`
   *(в моём стенде DNS через AdGuard `10.10.92.53`)*
 
 ### На Proxmox
@@ -63,20 +68,21 @@
 
 ---
 
-## 3) Как развернуть “из коробки” (создание ВМ + настройка всех ролей)
+## 3) Развертывание “из коробки” (создание ВМ + настройка всех ролей)
 
-### 3.1. Подготовка и зависимости
-
-Перейти в каталог с Ansible-проектом и поставить зависимости:
+### 3.1 Подготовка и зависимости
 
 ```bash
 cd hw04-patroni-ha/ansible
 ./bootstrap.sh
 source .venv/bin/activate
-3.2. Переменные окружения (env.sh)
+````
 
-Создайте env.sh (ВАЖНО: не коммитьте токены/пароли в Git):
+### 3.2 Переменные окружения (env.sh)
 
+> ВАЖНО: **не коммитьте** токены/пароли в Git. Держите `env.sh` локально, а в репозиторий можно положить `env.example.sh` с плейсхолдерами.
+
+```bash
 cat > env.sh <<'EOF'
 export PROXMOX_API_HOST='pve01.mgmt.home.arpa'
 export PROXMOX_API_USER='ansible@pve'
@@ -99,281 +105,188 @@ export BACKUP_DISK_SIZE_GB='200'
 EOF
 
 source ./env.sh
-3.3. Запуск (полный цикл)
+```
+
+### 3.3 Запуск (полный цикл)
+
+```bash
 ansible-playbook -i inventory/hosts.yml playbooks/site.yml
-4) Повторный прогон без пересоздания ВМ
+```
 
-Если ВМ уже созданы и вы хотите просто “донастроить/переприменить конфиги”:
+---
 
+## 4) Повторный прогон без пересоздания ВМ
+
+Если ВМ уже созданы и вы хотите просто “переприменить конфиги”:
+
+```bash
 ansible-playbook -i inventory/hosts.yml playbooks/site.yml -e provision_vms=false
-5) Проверка: что всё живо
-5.1 etcd (здоровье кластера)
+```
 
-Запускать можно с любой ноды, где есть etcdctl (удобно — на etcd-ноде):
+---
 
-ETCDCTL_API=3 etcdctl \
-  --endpoints="http://10.10.92.112:2379,http://10.10.92.113:2379,http://10.10.92.114:2379" \
-  endpoint status -w table
+## 5) Проверка: что всё живо
 
-ETCDCTL_API=3 etcdctl \
-  --endpoints="http://10.10.92.112:2379,http://10.10.92.113:2379,http://10.10.92.114:2379" \
-  endpoint health -w table
-
-Ожидаемо: все endpoints отвечают, здоровье true.
-
-5.2 Patroni (leader + replicas)
+### 5.1 Patroni (leader + replicas)
 
 На любой PG-ноде:
 
+```bash
 sudo patronictl -c /etc/patroni/patronictl.yml list
+```
 
 Ожидаемо:
 
-1 нода: Role = Leader, State = running
+* 1 нода: **Role = Leader**, **State = running**
+* 2 ноды: **Role = Replica**, **State = streaming**
 
-2 ноды: Role = Replica, State = streaming
+![Patroni: список до failover](screens/02_patronictl_list_before.png)
 
-5.3 HAProxy (маршрутизация writes/reads)
+### 5.2 HAProxy (маршрутизация writes/reads)
 
 Точки входа для клиентов:
 
-Writes (leader): 10.10.92.118:5432
+* Writes (leader): `10.10.92.118:5432`
+* Reads (replicas): `10.10.92.118:5433`
+* HAProxy stats: `http://10.10.92.118:7000/`
 
-Reads (replicas): 10.10.92.118:5433
+Проверка через `psql` (например, прямо на haproxy-ноде)
 
-HAProxy stats: http://10.10.92.118:7000/
+Если `psql` не установлен:
 
-Проверка через psql (на haproxy-ноде)
-
-Если psql не установлен:
-
+```bash
 sudo apt update
 sudo apt install -y postgresql-client
+```
 
 Далее:
 
+```bash
 export PGPASSWORD='PostgresPasswordChangeMe'
 
 # leader-only (writes)
-for i in {1..6}; do
-  psql -h 10.10.92.118 -p 5432 -U postgres -d postgres -tAc \
-    "select inet_server_addr(), pg_is_in_recovery();"
-done
+psql -h 10.10.92.118 -p 5432 -U postgres -d postgres -tAc \
+  "select inet_server_addr(), pg_is_in_recovery();"
 
-# replicas rr (reads)
-for i in {1..6}; do
-  psql -h 10.10.92.118 -p 5433 -U postgres -d postgres -tAc \
-    "select inet_server_addr(), pg_is_in_recovery();"
-done
+# replicas (reads)
+psql -h 10.10.92.118 -p 5433 -U postgres -d postgres -tAc \
+  "select inet_server_addr(), pg_is_in_recovery();"
+```
 
 Ожидаемо:
 
-5432 всегда один IP и |f
+* `5432` возвращает IP лидера и `|f`
+* `5433` возвращает IP реплики и `|t` (при повторении запросов будут встречаться разные реплики)
 
-5433 чередует IP реплик и |t
+![HAProxy: проверка primary (5432)](screens/03_haproxy_test_primary.png)
+![HAProxy: проверка replicas (5433)](screens/04_haproxy_test_replicas.png)
 
-6) Проверка отказоустойчивости (failover)
+---
+
+## 6) Проверка отказоустойчивости (failover)
 
 Цель: имитировать падение master/leader и показать, что:
 
-лидер переключается на другую ноду
+* лидер переключается на другую ноду
+* HAProxy `:5432` начинает вести на нового лидера
+* кластер остаётся доступным
 
-HAProxy :5432 начинает вести на нового лидера
+### 6.1 Зафиксировать текущего лидера
 
-кластер остаётся доступным
-
-6.1 Зафиксировать текущего лидера
-
-На любой PG-ноде:
-
+```bash
 sudo patronictl -c /etc/patroni/patronictl.yml list
+```
 
-Запомнить, кто сейчас Leader (например pg-01).
+### 6.2 “Уронить” лидера
 
-6.2 Наблюдение за leader через HAProxy (параллельная консоль)
+Вариант A (через Proxmox — имитация аварии железа): Stop/PowerOff VM лидера
+Вариант B (через systemctl на лидере):
 
-На haproxy-ноде:
-
-export PGPASSWORD='PostgresPasswordChangeMe'
-while true; do
-  date
-  psql -h 10.10.92.118 -p 5432 -U postgres -d postgres -tAc \
-    "select inet_server_addr(), pg_is_in_recovery();"
-  sleep 1
-done
-
-Ожидаемо: постоянно один IP (текущий лидер), |f.
-
-6.3 “Уронить” лидера (2 варианта)
-Вариант A (через Proxmox — имитация аварии железа)
-
-В UI/CLI Proxmox: Stop/PowerOff VM лидера (например pg-01).
-
-Вариант B (через systemctl на лидере)
-
-На лидере:
-
+```bash
 sudo systemctl stop patroni
+```
+
+![Failover: остановка patroni на лидере](screens/05_failover_stop_patroni.png)
 
 Подождать ~10–30 секунд.
 
-6.4 Проверить, что лидер сменился
+### 6.3 Проверить, что лидер сменился
 
-На любой PG-ноде:
-
+```bash
 sudo patronictl -c /etc/patroni/patronictl.yml list
+```
 
-Ожидаемо: Leader — уже другая нода.
+![Patroni: список после failover (новый лидер)](screens/06_patronictl_list_after.png)
 
-Параллельная консоль “наблюдения” через HAProxy должна показать:
+### 6.4 (Опционально) Вернуть упавшую ноду назад
 
-кратковременные ошибки подключения (в момент failover) — это нормально
+Если “стопали” patroni:
 
-затем inet_server_addr() сменится на IP нового лидера, |f
-
-6.5 Проверка “кластер реально работает” после failover
-
-После переключения лидера:
-
-export PGPASSWORD='PostgresPasswordChangeMe'
-psql -h 10.10.92.118 -p 5432 -U postgres -d postgres -c \
-  "create table if not exists ha_check(ts timestamptz default now(), leader inet);
-   insert into ha_check(leader) values (inet_server_addr());
-   select * from ha_check order by ts desc limit 5;"
-
-Ожидаемо: insert проходит через :5432 и возвращается строка.
-
-6.6 Вернуть упавшую ноду назад
-
-Если вы “стопали” в Proxmox — включить VM обратно.
-Если “стопали” patroni — запустить:
-
+```bash
 sudo systemctl start patroni
+```
 
 И снова проверить:
 
+```bash
 sudo patronictl -c /etc/patroni/patronictl.yml list
+```
 
-Ожидаемо: нода вернулась как Replica и streaming.
+Ожидаемо: нода вернулась как Replica и `streaming`.
 
-7) Бэкапы (pgBackRest + NFS repo)
+---
+
+## 7) Бэкапы (pgBackRest + NFS repo)
 
 Схема:
 
-Backup VM поднимает NFS export репозитория pgBackRest
+* Backup VM поднимает NFS export репозитория pgBackRest
+* На backup-VM примонтирован отдельный диск 200GB в `/srv/pgbackups`
+* Репозиторий доступен как `/srv/pgbackups/pgbackrest`
+* На PG-нодах NFS монтируется в `/backup/pgbackrest`
 
-На backup-VM монтируется отдельный диск 200GB в /srv/pgbackups
-
-Репозиторий доступен как /srv/pgbackups/pgbackrest
-
-На PG-нодах NFS монтируется в /backup/pgbackrest
-
-7.1 Проверка репозитория на PG-ноде (leader)
-
-Узнать лидера:
-
-sudo patronictl -c /etc/patroni/patronictl.yml list
+### 7.1 Проверка на лидере (pgBackRest info)
 
 На лидере:
 
+```bash
 df -h /backup/pgbackrest
-mount | grep pgbackrest || true
 sudo -u postgres pgbackrest --stanza=pgcluster info
+```
 
-Ожидаемо:
+![pgBackRest: info на лидере](screens/07_pgbackrest_info.png)
 
-/backup/pgbackrest примонтирован (NFS)
+Ожидаемо: видно `stanza` и список backup’ов (после первого full — минимум один).
 
-pgbackrest info показывает stanza pgcluster и список backup’ов
+---
 
-7.2 Проверка репозитория на backup server
+## 8) Итог
 
-На backup-01:
+Развёрнут HA-кластер PostgreSQL на базе Patroni с распределённым DCS (etcd) и “умной” балансировкой/роутингом (HAProxy):
 
-df -h /srv/pgbackups
-ls -lah /srv/pgbackups/pgbackrest
-ls -lah /srv/pgbackups/pgbackrest/backup/pgcluster || true
-
-Ожидаемо: есть директории archive/, backup/, появляются файлы stanza/backup.
-
-7.3 Проверка расписания (systemd timer)
-
-На лидере:
-
-systemctl list-timers --all | grep -i pgbackrest || true
-systemctl status pgbackrest-backup.timer --no-pager
-journalctl -u pgbackrest-backup.service -n 100 --no-pager
-7.4 Принудительный запуск backup (чтобы показать “делается”)
-
-На лидере:
-
-sudo systemctl start pgbackrest-backup.service
-sudo -u postgres pgbackrest --stanza=pgcluster info
-
-Ожидаемо: после запуска info покажет свежий backup (или обновлённые таймстампы).
-
-8) Скрины для сдачи (рекомендуемый минимум)
-
-Положить в hw04-patroni-ha/screens/:
-
-01_patronictl_before.png — patronictl list до failover
-
-02_haproxy_5432_before.png — проверка через HAProxy:5432 до
-
-03_failover_action.png — stop VM в Proxmox (или systemctl stop patroni)
-
-04_patronictl_after_failover.png — patronictl list после (новый leader)
-
-05_haproxy_5432_after.png — HAProxy:5432 ведёт на нового лидера
-
-06_haproxy_5433_reads.png — HAProxy:5433 отдаёт реплики (RR)
-
-07_pgbackrest_info.png — pgbackrest info на лидере
-
-08_backup_vm_repo.png — содержимое /srv/pgbackups/pgbackrest на backup-VM
-
-09_pgbackrest_timer.png — list-timers/journalctl на лидере
-
-10_pgbackrest_manual_run.png — принудительный запуск backup + info
-
-9) Мини-отчёт: что сделано и почему это важно
-
-Развёрнут HA-кластер PostgreSQL на базе Patroni с распределённым DCS (etcd) и балансировкой/роутингом (HAProxy).
-
-HAProxy разделяет трафик:
-
-:5432 — всегда на leader (writes)
-
-:5433 — на replicas (reads)
+* `:5432` — всегда на leader (writes)
+* `:5433` — на replicas (reads)
 
 Проверен failover: при падении лидера кластер выбирает нового лидера и HAProxy начинает вести writes на него.
 
 Настроены бэкапы через pgBackRest:
 
-репозиторий на отдельной backup-VM с отдельным диском (200GB)
+* репозиторий на отдельной backup-VM с отдельным диском 200GB
+* доступ по NFS
+* выполнен первичный backup (проверено через `pgbackrest info`)
 
-общий доступ для PG-нод через NFS
+---
 
-автоматический запуск через systemd timer
+## 9) Безопасность
 
-выполнен первичный full backup и проверено наличие в репозитории
+* **Не коммитить `env.sh`** (там токены/пароли).
+* В репозиторий — только `env.example.sh` без секретов.
 
-10) Важное про безопасность (чтобы не было “подкопался”)
+---
 
-Не коммитить env.sh (там токены/пароли).
+## 10) Troubleshooting (коротко)
 
-Не хранить токены/пароли в репозитории.
-
-В репо можно хранить env.example.sh без секретов (placeholder’ы).
-
-11) Troubleshooting (коротко)
-
-401 Unauthorized: invalid token value → неправильный PROXMOX_API_TOKEN_SECRET
-
-“Missing required env vars” → не экспортированы переменные (особенно CLOUD_INIT_SSH_PUBLIC_KEY)
-
-psql not found на haproxy → sudo apt install postgresql-client
-
-patronictl не видит etcd → проверь /etc/patroni/patronictl.yml (ендпоинты etcd должны быть 10.10.92.112-114:2379)
-
-pgbackrest permission denied → права на repo (на стенде настроено для lab-режима, но если ужесточать — делайте владельца/группу под postgres)
+* `401 Unauthorized: invalid token value` → неправильный `PROXMOX_API_TOKEN_SECRET`
+* `Missing required env vars` → не экспортированы переменные (особенно `CLOUD_INIT_SSH_PUBLIC_KEY`)
+* `psql not found` на haproxy → `sudo apt install postgresql-client`
+* `patronictl` ругается на etcd → проверь `/etc/patroni/patronictl.yml` (etcd endpoints должны быть `10.10.92.112-114:2379`)
