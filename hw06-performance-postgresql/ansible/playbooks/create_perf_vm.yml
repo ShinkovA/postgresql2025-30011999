@@ -1,0 +1,85 @@
+---
+- name: Create performance PostgreSQL VM on Proxmox
+  hosts: localhost
+  gather_facts: false
+  vars:
+    proxmox_api_host: "{{ lookup('env', 'PROXMOX_API_HOST') }}"
+    proxmox_api_user: "{{ lookup('env', 'PROXMOX_API_USER') }}"
+    proxmox_api_token_id: "{{ lookup('env', 'PROXMOX_API_TOKEN_ID') }}"
+    proxmox_api_token_secret: "{{ lookup('env', 'PROXMOX_API_TOKEN_SECRET') }}"
+    proxmox_node: "{{ lookup('env', 'PROXMOX_NODE') }}"
+    proxmox_storage: "{{ lookup('env', 'PROXMOX_STORAGE') }}"
+    proxmox_template_id: "{{ lookup('env', 'PROXMOX_TEMPLATE_ID') }}"
+    ci_user: "{{ lookup('env', 'CI_USER') }}"
+    ci_password: "{{ lookup('env', 'CI_PASSWORD') }}"
+    dns_server: "{{ lookup('env', 'DNS_SERVER') }}"
+    search_domain: "{{ lookup('env', 'SEARCH_DOMAIN') }}"
+    cloud_init_ssh_public_key: "{{ lookup('env', 'CLOUD_INIT_SSH_PUBLIC_KEY') }}"
+  tasks:
+    - name: Assert required environment variables
+      ansible.builtin.assert:
+        that:
+          - proxmox_api_host | length > 0
+          - proxmox_api_user | length > 0
+          - proxmox_api_token_id | length > 0
+          - proxmox_api_token_secret | length > 0
+          - proxmox_node | length > 0
+          - proxmox_storage | length > 0
+          - proxmox_template_id | length > 0
+          - ci_user | length > 0
+          - ci_password | length > 0
+          - cloud_init_ssh_public_key | length > 0
+        fail_msg: "Заполни env.sh и выполни: source ./env.sh"
+
+    - name: Clone VM from template
+      community.general.proxmox_kvm:
+        api_host: "{{ proxmox_api_host }}"
+        api_user: "{{ proxmox_api_user }}"
+        api_token_id: "{{ proxmox_api_token_id }}"
+        api_token_secret: "{{ proxmox_api_token_secret }}"
+        node: "{{ proxmox_node }}"
+        clone: "{{ proxmox_template_id }}"
+        newid: "{{ perf_vm_vmid | int }}"
+        name: "{{ perf_vm_name }}"
+        storage: "{{ proxmox_storage }}"
+        full: true
+        state: present
+
+    - name: Configure cloud-init and hardware
+      community.general.proxmox_kvm:
+        api_host: "{{ proxmox_api_host }}"
+        api_user: "{{ proxmox_api_user }}"
+        api_token_id: "{{ proxmox_api_token_id }}"
+        api_token_secret: "{{ proxmox_api_token_secret }}"
+        node: "{{ proxmox_node }}"
+        vmid: "{{ perf_vm_vmid }}"
+        name: "{{ perf_vm_name }}"
+        memory: "{{ perf_vm_memory_mb }}"
+        cores: "{{ perf_vm_cores }}"
+        sockets: 1
+        ciuser: "{{ ci_user }}"
+        cipassword: "{{ ci_password }}"
+        sshkeys: "{{ cloud_init_ssh_public_key }}"
+        nameservers: "{{ dns_server }}"
+        searchdomains: "{{ search_domain }}"
+        ipconfig:
+          ipconfig0: "ip={{ perf_vm_ip_cidr }},gw={{ perf_vm_gw }}"
+        update: true
+        agent: enabled=1
+        state: present
+
+    - name: Start performance VM
+      community.general.proxmox_kvm:
+        api_host: "{{ proxmox_api_host }}"
+        api_user: "{{ proxmox_api_user }}"
+        api_token_id: "{{ proxmox_api_token_id }}"
+        api_token_secret: "{{ proxmox_api_token_secret }}"
+        node: "{{ proxmox_node }}"
+        vmid: "{{ perf_vm_vmid }}"
+        state: started
+
+    - name: Wait for SSH on performance VM
+      ansible.builtin.wait_for:
+        host: "{{ perf_vm_ip }}"
+        port: 22
+        timeout: 600

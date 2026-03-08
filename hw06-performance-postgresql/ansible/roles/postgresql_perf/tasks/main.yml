@@ -1,0 +1,71 @@
+---
+- name: Install apt prerequisites
+  ansible.builtin.apt:
+    name:
+      - gnupg
+      - ca-certificates
+      - apt-transport-https
+      - curl
+    state: present
+    update_cache: true
+    lock_timeout: 600
+
+- name: Add PGDG signing key
+  ansible.builtin.apt_key:
+    url: https://www.postgresql.org/media/keys/ACCC4CF8.asc
+    state: present
+
+- name: Add PGDG apt repository
+  ansible.builtin.apt_repository:
+    repo: "deb https://apt.postgresql.org/pub/repos/apt {{ ansible_facts['distribution_release'] }}-pgdg main"
+    filename: pgdg
+    state: present
+
+- name: Install PostgreSQL and pgbench
+  ansible.builtin.apt:
+    name:
+      - "postgresql-{{ postgresql_version }}"
+      - "postgresql-client-{{ postgresql_version }}"
+      - "postgresql-contrib-{{ postgresql_version }}"
+    state: present
+    update_cache: true
+    lock_timeout: 600
+
+- name: Ensure conf.d directory exists
+  ansible.builtin.file:
+    path: "/etc/postgresql/{{ postgresql_version }}/main/conf.d"
+    state: directory
+    mode: "0755"
+
+- name: Ensure include_dir is enabled for conf.d
+  ansible.builtin.lineinfile:
+    path: "/etc/postgresql/{{ postgresql_version }}/main/postgresql.conf"
+    regexp: '^#?include_dir\s*='
+    line: "include_dir = 'conf.d'"
+  notify: Restart PostgreSQL
+
+- name: Remove tuned profile when baseline is requested
+  ansible.builtin.file:
+    path: "/etc/postgresql/{{ postgresql_version }}/main/conf.d/99-hw06-tuned.conf"
+    state: absent
+  when: pg_perf_profile == 'baseline'
+  notify: Restart PostgreSQL
+
+- name: Deploy tuned profile when requested
+  ansible.builtin.template:
+    src: 99-hw06-tuned.conf.j2
+    dest: "/etc/postgresql/{{ postgresql_version }}/main/conf.d/99-hw06-tuned.conf"
+    owner: root
+    group: root
+    mode: "0644"
+  when: pg_perf_profile == 'tuned'
+  notify: Restart PostgreSQL
+
+- name: Ensure PostgreSQL is enabled and running
+  ansible.builtin.systemd:
+    name: "{{ postgresql_service_name }}"
+    enabled: true
+    state: started
+
+- name: Flush handlers
+  ansible.builtin.meta: flush_handlers

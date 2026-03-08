@@ -1,0 +1,9 @@
+---
+- name: Apply aggressive benchmark PostgreSQL profile
+  hosts: perf_nodes
+  become: true
+  gather_facts: true
+  vars:
+    pg_perf_profile: tuned
+  roles:
+    - postgresql_perf

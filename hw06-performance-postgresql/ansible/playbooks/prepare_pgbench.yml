@@ -1,0 +1,26 @@
+---
+- name: Prepare pgbench dataset
+  hosts: perf_nodes
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Recreate pgbench database
+      ansible.builtin.shell: |
+        set -euo pipefail
+        sudo -u postgres dropdb --if-exists {{ pgbench_db }}
+        sudo -u postgres createdb {{ pgbench_db }}
+      args:
+        executable: /bin/bash
+
+    - name: Initialize pgbench dataset
+      ansible.builtin.shell: |
+        set -euo pipefail
+        sudo -u postgres pgbench -i -s {{ pgbench_scale }} {{ pgbench_db }}
+      args:
+        executable: /bin/bash
+      register: pgbench_init
+      changed_when: true
+
+    - name: Show pgbench init summary
+      ansible.builtin.debug:
+        var: pgbench_init.stdout_lines

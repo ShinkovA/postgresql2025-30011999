@@ -1,0 +1,42 @@
+---
+- name: Run pgbench benchmark
+  hosts: perf_nodes
+  become: true
+  gather_facts: false
+  vars:
+    pgbench_run_label: "{{ pgbench_run_label | default('run') }}"
+  tasks:
+    - name: Ensure local results directory exists on controller
+      ansible.builtin.file:
+        path: "{{ playbook_dir }}/../results"
+        state: directory
+        mode: "0755"
+      delegate_to: localhost
+      run_once: true
+
+    - name: Run pgbench
+      ansible.builtin.shell: |
+        set -euo pipefail
+        sudo -u postgres pgbench           -c {{ pgbench_clients }}           -j {{ pgbench_jobs }}           -T {{ pgbench_time }}           -M {{ pgbench_protocol }}           {{ pgbench_extra_args }}           {{ pgbench_db }}
+      args:
+        executable: /bin/bash
+      register: pgbench_run
+      changed_when: true
+
+    - name: Save pgbench output on remote host
+      ansible.builtin.copy:
+        dest: "/tmp/pgbench-{{ pgbench_run_label }}.txt"
+        mode: "0644"
+        content: |
+          {{ pgbench_run.stdout }}
+          {{ pgbench_run.stderr }}
+
+    - name: Fetch pgbench output to controller
+      ansible.builtin.fetch:
+        src: "/tmp/pgbench-{{ pgbench_run_label }}.txt"
+        dest: "{{ playbook_dir }}/../results/"
+        flat: true
+
+    - name: Show pgbench output
+      ansible.builtin.debug:
+        msg: "{{ pgbench_run.stdout_lines }}"

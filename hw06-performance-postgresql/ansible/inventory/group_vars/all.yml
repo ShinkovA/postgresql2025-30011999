@@ -1,0 +1,37 @@
+perf_vm_name: "pgperf-01.prod.home.arpa"
+perf_vm_vmid: 6601
+perf_vm_ip: "10.10.92.121"
+perf_vm_ip_cidr: "10.10.92.121/24"
+perf_vm_gw: "10.10.92.1"
+
+perf_vm_cores: 8
+perf_vm_memory_mb: 32768
+
+postgresql_version: 17
+postgresql_service_name: "postgresql"
+
+pgbench_db: pgbench
+pgbench_scale: 100
+pgbench_clients: 20
+pgbench_jobs: 4
+pgbench_time: 60
+pgbench_protocol: prepared
+pgbench_extra_args: ""
+
+pg_perf_profile: baseline
+
+pg_tuned_shared_buffers: "8GB"
+pg_tuned_effective_cache_size: "24GB"
+pg_tuned_work_mem: "32MB"
+pg_tuned_maintenance_work_mem: "2GB"
+pg_tuned_wal_buffers: "-1"
+pg_tuned_max_wal_size: "16GB"
+pg_tuned_min_wal_size: "4GB"
+pg_tuned_checkpoint_timeout: "30min"
+pg_tuned_checkpoint_completion_target: "0.9"
+pg_tuned_random_page_cost: "1.1"
+pg_tuned_effective_io_concurrency: 256
+pg_tuned_max_worker_processes: 16
+pg_tuned_max_parallel_workers: 8
+pg_tuned_max_parallel_workers_per_gather: 4
+pg_tuned_max_parallel_maintenance_workers: 4

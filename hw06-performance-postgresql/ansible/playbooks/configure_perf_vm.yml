@@ -1,0 +1,8 @@
+---
+- name: Configure standalone PostgreSQL performance VM
+  hosts: perf_nodes
+  become: true
+  gather_facts: true
+  roles:
+    - common
+    - postgresql_perf

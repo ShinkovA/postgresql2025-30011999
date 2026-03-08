@@ -1,0 +1,48 @@
+# HW06 tuned profile (prod-like, durability preserved, HDD-friendly)
+
+shared_buffers = '{{ pg_tuned_shared_buffers }}'
+effective_cache_size = '{{ pg_tuned_effective_cache_size }}'
+work_mem = '{{ pg_tuned_work_mem }}'
+maintenance_work_mem = '{{ pg_tuned_maintenance_work_mem }}'
+
+# durability / safety
+wal_level = replica
+synchronous_commit = on
+fsync = on
+full_page_writes = on
+archive_mode = off
+hot_standby = off
+max_wal_senders = 0
+max_replication_slots = 0
+
+# checkpoints / WAL
+checkpoint_timeout = '{{ pg_tuned_checkpoint_timeout }}'
+checkpoint_completion_target = {{ pg_tuned_checkpoint_completion_target }}
+max_wal_size = '{{ pg_tuned_max_wal_size }}'
+min_wal_size = '{{ pg_tuned_min_wal_size }}'
+wal_buffers = {{ pg_tuned_wal_buffers }}
+
+# planner / IO (HDD-friendly)
+random_page_cost = 3.0
+effective_io_concurrency = 8
+maintenance_io_concurrency = 8
+
+# parallelism
+max_worker_processes = {{ pg_tuned_max_worker_processes }}
+max_parallel_workers = {{ pg_tuned_max_parallel_workers }}
+max_parallel_workers_per_gather = {{ pg_tuned_max_parallel_workers_per_gather }}
+max_parallel_maintenance_workers = {{ pg_tuned_max_parallel_maintenance_workers }}
+
+# background writer / vacuum
+autovacuum = on
+autovacuum_max_workers = 5
+autovacuum_naptime = 10s
+autovacuum_vacuum_cost_limit = 2000
+
+bgwriter_delay = 50ms
+bgwriter_lru_maxpages = 1000
+bgwriter_lru_multiplier = 4.0
+
+# memory
+jit = off
+huge_pages = on

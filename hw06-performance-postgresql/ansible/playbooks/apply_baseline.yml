@@ -1,0 +1,9 @@
+---
+- name: Apply baseline PostgreSQL profile
+  hosts: perf_nodes
+  become: true
+  gather_facts: true
+  vars:
+    pg_perf_profile: baseline
+  roles:
+    - postgresql_perf

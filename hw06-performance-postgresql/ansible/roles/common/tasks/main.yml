@@ -1,0 +1,30 @@
+---
+- name: Wait for cloud-init to finish
+  ansible.builtin.wait_for:
+    path: /var/lib/cloud/instance/boot-finished
+    timeout: 900
+  changed_when: false
+  failed_when: false
+
+- name: Stop apt timers/services that may hold dpkg lock (best-effort)
+  ansible.builtin.systemd:
+    name: "{{ item }}"
+    state: stopped
+    enabled: false
+  loop:
+    - apt-daily.timer
+    - apt-daily-upgrade.timer
+    - apt-daily.service
+    - apt-daily-upgrade.service
+    - unattended-upgrades.service
+  failed_when: false
+
+- name: Wait until apt/dpkg locks are released
+  ansible.builtin.shell: |
+    set -euo pipefail
+    while fuser /var/lib/dpkg/lock >/dev/null 2>&1 ||           fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 ||           fuser /var/cache/apt/archives/lock >/dev/null 2>&1; do
+      sleep 2
+    done
+  args:
+    executable: /bin/bash
+  changed_when: false
