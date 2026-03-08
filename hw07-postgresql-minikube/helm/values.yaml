@@ -1,0 +1,31 @@
+architecture: replication
+
+auth:
+  enablePostgresUser: true
+  postgresPassword: "postgres123"
+  username: "appuser"
+  password: "appsecret123"
+  database: "logistics"
+  replicationUsername: "repl_user"
+  replicationPassword: "replpass123"
+
+service:
+  ports:
+    postgresql: 5432
+
+primary:
+  persistence:
+    enabled: true
+    size: 2Gi
+  service:
+    ports:
+      postgresql: 5432
+
+readReplicas:
+  replicaCount: 1
+  persistence:
+    enabled: true
+    size: 2Gi
+  service:
+    ports:
+      postgresql: 5432

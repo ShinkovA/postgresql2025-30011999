@@ -1,0 +1,63 @@
+---
+- name: Deploy PostgreSQL via Helm
+  hosts: all
+  gather_facts: false
+
+  tasks:
+    - name: Copy values file to remote host
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../../helm/values.yaml"
+        dest: /tmp/hw07-postgresql-values.yaml
+        mode: "0644"
+
+    - name: Add Bitnami repo and update index
+      ansible.builtin.shell: |
+        set -euo pipefail
+        helm repo add bitnami https://charts.bitnami.com/bitnami || true
+        helm repo update
+      args:
+        executable: /bin/bash
+      changed_when: true
+
+    - name: Install Helm release
+      ansible.builtin.shell: |
+        set -euo pipefail
+        helm upgrade --install {{ helm_release_name }} bitnami/postgresql \
+          --namespace {{ helm_namespace }} \
+          --create-namespace \
+          -f /tmp/hw07-postgresql-values.yaml
+      args:
+        executable: /bin/bash
+      changed_when: true
+
+    - name: Wait for all Helm StatefulSets discovered by labels
+      ansible.builtin.shell: |
+        set -euo pipefail
+        STS_LIST="$(kubectl -n {{ helm_namespace }} get statefulset \
+          -l app.kubernetes.io/instance={{ helm_release_name }},app.kubernetes.io/name=postgresql \
+          -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}')"
+
+        test -n "$STS_LIST"
+
+        while read -r sts; do
+          [ -n "$sts" ] || continue
+          kubectl -n {{ helm_namespace }} rollout status statefulset/"$sts" --timeout=600s
+        done <<< "$STS_LIST"
+      args:
+        executable: /bin/bash
+      changed_when: false
+
+    - name: Show Helm resources
+      ansible.builtin.shell: |
+        kubectl -n {{ helm_namespace }} get statefulsets
+        kubectl -n {{ helm_namespace }} get pods -o wide
+        kubectl -n {{ helm_namespace }} get svc
+        kubectl -n {{ helm_namespace }} get pvc
+      args:
+        executable: /bin/bash
+      register: helm_objects
+      changed_when: false
+
+    - name: Print Helm resources
+      ansible.builtin.debug:
+        var: helm_objects.stdout_lines

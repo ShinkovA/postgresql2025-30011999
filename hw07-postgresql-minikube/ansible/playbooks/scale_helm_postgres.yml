@@ -1,0 +1,40 @@
+---
+- name: Scale Helm PostgreSQL to 3 pods total
+  hosts: all
+  gather_facts: false
+
+  tasks:
+    - name: Scale read replicas from 1 to 2
+      ansible.builtin.shell: |
+        set -euo pipefail
+        helm upgrade {{ helm_release_name }} bitnami/postgresql \
+          --namespace {{ helm_namespace }} \
+          -f /tmp/hw07-postgresql-values.yaml \
+          --set readReplicas.replicaCount=2
+      args:
+        executable: /bin/bash
+      changed_when: true
+
+    - name: Wait for all Helm StatefulSets after scaling
+      ansible.builtin.shell: |
+        set -euo pipefail
+        STS_LIST="$(kubectl -n {{ helm_namespace }} get statefulset \
+          -l app.kubernetes.io/instance={{ helm_release_name }},app.kubernetes.io/name=postgresql \
+          -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}')"
+
+        test -n "$STS_LIST"
+
+        while read -r sts; do
+          [ -n "$sts" ] || continue
+          kubectl -n {{ helm_namespace }} rollout status statefulset/"$sts" --timeout=600s
+        done <<< "$STS_LIST"
+
+        kubectl -n {{ helm_namespace }} get pods
+      args:
+        executable: /bin/bash
+      register: scaled_status
+      changed_when: false
+
+    - name: Print scaled pods
+      ansible.builtin.debug:
+        var: scaled_status.stdout_lines

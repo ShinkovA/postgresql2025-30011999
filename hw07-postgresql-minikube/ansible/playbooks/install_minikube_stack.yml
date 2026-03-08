@@ -1,0 +1,99 @@
+---
+- name: Install Docker, kubectl, Minikube and Helm
+  hosts: all
+  become: true
+  gather_facts: true
+
+  tasks:
+    - name: Install base packages
+      ansible.builtin.apt:
+        name:
+          - ca-certificates
+          - curl
+          - gnupg
+          - apt-transport-https
+          - conntrack
+          - socat
+          - docker.io
+        state: present
+        update_cache: true
+        lock_timeout: 600
+
+    - name: Ensure docker service is enabled
+      ansible.builtin.systemd:
+        name: docker
+        enabled: true
+        state: started
+
+    - name: Add ansible user to docker group
+      ansible.builtin.user:
+        name: "{{ ansible_user }}"
+        groups: docker
+        append: true
+
+    - name: Ensure apt keyrings directory exists
+      ansible.builtin.file:
+        path: /etc/apt/keyrings
+        state: directory
+        mode: "0755"
+
+    - name: Install kubectl signing key
+      ansible.builtin.shell: |
+        set -euo pipefail
+        curl -fsSL https://pkgs.k8s.io/core:/stable:/{{ kubectl_minor_version }}/deb/Release.key \
+          | gpg --dearmor \
+          | tee /etc/apt/keyrings/kubernetes-apt-keyring.gpg >/dev/null
+        chmod 644 /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+      args:
+        executable: /bin/bash
+      changed_when: true
+
+    - name: Configure kubectl repo
+      ansible.builtin.copy:
+        dest: /etc/apt/sources.list.d/kubernetes.list
+        mode: "0644"
+        content: |
+          deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/{{ kubectl_minor_version }}/deb/ /
+
+    - name: Install kubectl
+      ansible.builtin.apt:
+        name: kubectl
+        state: present
+        update_cache: true
+        lock_timeout: 600
+
+    - name: Install minikube binary
+      ansible.builtin.get_url:
+        url: https://github.com/kubernetes/minikube/releases/latest/download/minikube-linux-amd64
+        dest: /usr/local/bin/minikube
+        mode: "0755"
+
+    - name: Download official Helm installer script
+      ansible.builtin.get_url:
+        url: https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
+        dest: /tmp/get-helm-3
+        mode: "0755"
+
+    - name: Install Helm via official script
+      ansible.builtin.shell: |
+        set -euo pipefail
+        /tmp/get-helm-3
+      args:
+        executable: /bin/bash
+      changed_when: true
+
+    - name: Show installed versions
+      ansible.builtin.shell: |
+        set -euo pipefail
+        docker --version
+        kubectl version --client
+        minikube version
+        helm version
+      args:
+        executable: /bin/bash
+      register: versions
+      changed_when: false
+
+    - name: Print versions
+      ansible.builtin.debug:
+        var: versions.stdout_lines

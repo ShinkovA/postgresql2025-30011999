@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: postgres-config
+  namespace: hw07-manifest
+data:
+  POSTGRES_DB: logistics

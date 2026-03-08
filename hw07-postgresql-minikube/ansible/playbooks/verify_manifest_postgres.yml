@@ -1,0 +1,58 @@
+---
+- name: Verify manifest PostgreSQL via port-forward + psql
+  hosts: all
+  gather_facts: false
+
+  tasks:
+    - name: Stop old port-forward if pid file exists
+      ansible.builtin.shell: |
+        set -euo pipefail
+        if [ -f /tmp/hw07-manifest-port-forward.pid ]; then
+          kill "$(cat /tmp/hw07-manifest-port-forward.pid)" || true
+          rm -f /tmp/hw07-manifest-port-forward.pid
+        fi
+      args:
+        executable: /bin/bash
+      changed_when: false
+
+    - name: Start port-forward
+      ansible.builtin.shell: |
+        set -euo pipefail
+        nohup kubectl -n {{ manifest_namespace }} port-forward svc/postgres-manifest {{ psql_manifest_local_port }}:5432 >/tmp/hw07-manifest-port-forward.log 2>&1 &
+        echo $! > /tmp/hw07-manifest-port-forward.pid
+      args:
+        executable: /bin/bash
+      changed_when: true
+
+    - name: Wait for port-forward
+      ansible.builtin.wait_for:
+        host: 127.0.0.1
+        port: "{{ psql_manifest_local_port }}"
+        timeout: 60
+
+    - name: Run test query
+      ansible.builtin.shell: |
+        set -euo pipefail
+        PGPASSWORD='{{ manifest_db_password }}' psql \
+          -h 127.0.0.1 -p {{ psql_manifest_local_port }} \
+          -U {{ manifest_db_user }} -d {{ manifest_db_name }} \
+          -c "select current_database(), current_user, version();"
+      args:
+        executable: /bin/bash
+      register: manifest_query
+      changed_when: false
+
+    - name: Show query result
+      ansible.builtin.debug:
+        var: manifest_query.stdout_lines
+
+    - name: Stop port-forward
+      ansible.builtin.shell: |
+        set -euo pipefail
+        if [ -f /tmp/hw07-manifest-port-forward.pid ]; then
+          kill "$(cat /tmp/hw07-manifest-port-forward.pid)" || true
+          rm -f /tmp/hw07-manifest-port-forward.pid
+        fi
+      args:
+        executable: /bin/bash
+      changed_when: false

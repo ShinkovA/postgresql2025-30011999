@@ -1,0 +1,80 @@
+---
+- name: Verify Helm PostgreSQL via port-forward + psql
+  hosts: all
+  gather_facts: false
+
+  tasks:
+    - name: Stop old Helm port-forward if pid file exists
+      ansible.builtin.shell: |
+        set -euo pipefail
+        if [ -f /tmp/hw07-helm-port-forward.pid ]; then
+          kill "$(cat /tmp/hw07-helm-port-forward.pid)" || true
+          rm -f /tmp/hw07-helm-port-forward.pid
+        fi
+      args:
+        executable: /bin/bash
+      changed_when: false
+
+    - name: Discover primary pod name
+      ansible.builtin.shell: |
+        set -euo pipefail
+        kubectl -n {{ helm_namespace }} get pods \
+          -l app.kubernetes.io/instance={{ helm_release_name }},app.kubernetes.io/name=postgresql,app.kubernetes.io/component=primary \
+          -o jsonpath='{.items[0].metadata.name}'
+      args:
+        executable: /bin/bash
+      register: helm_primary_pod
+      changed_when: false
+
+    - name: Start port-forward to primary pod
+      ansible.builtin.shell: |
+        set -euo pipefail
+        nohup kubectl -n {{ helm_namespace }} port-forward pod/{{ helm_primary_pod.stdout }} {{ psql_helm_local_port }}:5432 >/tmp/hw07-helm-port-forward.log 2>&1 &
+        echo $! > /tmp/hw07-helm-port-forward.pid
+      args:
+        executable: /bin/bash
+      changed_when: true
+
+    - name: Wait for Helm port-forward
+      ansible.builtin.wait_for:
+        host: 127.0.0.1
+        port: "{{ psql_helm_local_port }}"
+        timeout: 60
+
+    - name: Run Helm query
+      ansible.builtin.shell: |
+        set -euo pipefail
+        PGPASSWORD='{{ helm_db_password }}' psql \
+          -h 127.0.0.1 -p {{ psql_helm_local_port }} \
+          -U {{ helm_db_user }} -d {{ helm_db_name }} \
+          -c "select current_database(), current_user, version();"
+      args:
+        executable: /bin/bash
+      register: helm_query
+      changed_when: false
+
+    - name: Show Helm query
+      ansible.builtin.debug:
+        var: helm_query.stdout_lines
+
+    - name: Show Helm pods
+      ansible.builtin.shell: kubectl -n {{ helm_namespace }} get pods
+      args:
+        executable: /bin/bash
+      register: helm_pods
+      changed_when: false
+
+    - name: Print Helm pods
+      ansible.builtin.debug:
+        var: helm_pods.stdout_lines
+
+    - name: Stop Helm port-forward
+      ansible.builtin.shell: |
+        set -euo pipefail
+        if [ -f /tmp/hw07-helm-port-forward.pid ]; then
+          kill "$(cat /tmp/hw07-helm-port-forward.pid)" || true
+          rm -f /tmp/hw07-helm-port-forward.pid
+        fi
+      args:
+        executable: /bin/bash
+      changed_when: false

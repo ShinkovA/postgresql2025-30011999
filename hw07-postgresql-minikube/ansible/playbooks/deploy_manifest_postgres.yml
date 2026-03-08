@@ -1,0 +1,55 @@
+---
+- name: Deploy PostgreSQL via manifests
+  hosts: all
+  gather_facts: false
+  tasks:
+    - name: Copy manifests to remote host
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../../manifests/"
+        dest: /tmp/hw07-manifests/
+        mode: preserve
+
+    - name: Apply namespace
+      ansible.builtin.shell: kubectl apply -f /tmp/hw07-manifests/namespace.yaml
+      args:
+        executable: /bin/bash
+      changed_when: true
+
+    - name: Apply ConfigMap
+      ansible.builtin.shell: kubectl -n {{ manifest_namespace }} apply -f /tmp/hw07-manifests/configmap.yaml
+      args:
+        executable: /bin/bash
+      changed_when: true
+
+    - name: Apply Secret
+      ansible.builtin.shell: |
+        kubectl -n {{ manifest_namespace }} create secret generic postgres-secret           --from-literal=postgres-user='{{ manifest_db_user }}'           --from-literal=postgres-password='{{ manifest_db_password }}'           --dry-run=client -o yaml | kubectl apply -f -
+      args:
+        executable: /bin/bash
+      changed_when: true
+
+    - name: Apply app manifests
+      ansible.builtin.shell: kubectl -n {{ manifest_namespace }} apply -f /tmp/hw07-manifests/postgres-app.yaml
+      args:
+        executable: /bin/bash
+      changed_when: true
+
+    - name: Wait for rollout
+      ansible.builtin.shell: kubectl -n {{ manifest_namespace }} rollout status deployment/postgres-manifest --timeout=300s
+      args:
+        executable: /bin/bash
+      changed_when: false
+
+    - name: Show manifest objects
+      ansible.builtin.shell: |
+        kubectl -n {{ manifest_namespace }} get pods
+        kubectl -n {{ manifest_namespace }} get svc
+        kubectl -n {{ manifest_namespace }} get pvc
+      args:
+        executable: /bin/bash
+      register: out
+      changed_when: false
+
+    - name: Print manifest objects
+      ansible.builtin.debug:
+        var: out.stdout_lines
