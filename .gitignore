@@ -16,3 +16,5 @@
 # ssh keys
 **/*.pem
 **/*.key
+*.tgz
+!Project/ansible-pg-ha-lab-bgp-current.tgz
